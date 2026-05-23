@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScholarTrack ESP-32 Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">ScholarTrack</h1>
+                <div class="user-info">
+                    <img class="user-avatar" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='40' r='20' fill='%234a5568'/%3E%3Cellipse cx='50' cy='80' rx='30' ry='20' fill='%234a5568'/%3E%3C/svg%3E" alt="Admin">
+                    <div class="user-details">
+                        <p class="user-name">Main Branch</p>
+                        <p class="user-location">Level 2 Archive</p>
+                    </div>
+                </div>
+            </div>
+            
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" data-page="overview">
+                    <span class="material-symbols-outlined">grid_view</span>
+                    <span>Floor Overview</span>
+                </a>
+                <a href="#" class="nav-item" data-page="logs">
+                    <span class="material-symbols-outlined">history</span>
+                    <span>Seating Logs</span>
+                </a>
+                <a href="#" class="nav-item" data-page="settings">
+                    <span class="material-symbols-outlined">settings</span>
+                    <span>Settings</span>
+                </a>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <button class="btn btn-primary" onclick="generateReport()">Generate Report</button>
+            </div>
+        </aside>
+
+        <!-- Mobile Menu Toggle -->
+        <button class="mobile-menu-toggle" id="mobileMenuToggle">
+            <span class="material-symbols-outlined">menu</span>
+        </button>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="header">
+                <div class="header-left">
+                    <h2 class="header-title">ScholarTrack Library</h2>
+                    <div class="stats">
+                        <div class="stat">
+                            <span class="stat-label">Occupancy</span>
+                            <span class="stat-value" id="occupancy">142 / 200</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">Warnings</span>
+                            <span class="stat-value warning" id="warnings">08 Active</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="header-right">
+                    <div class="search-container">
+                        <span class="material-symbols-outlined search-icon">search</span>
+                        <input type="text" class="search-input" placeholder="Search tables or students..." id="searchInput">
+                    </div>
+                    <div class="header-actions">
+                        <button class="icon-btn" onclick="showNotifications()">
+                            <span class="material-symbols-outlined">notifications</span>
+                        </button>
+                        <button class="icon-btn" onclick="showAccount()">
+                            <span class="material-symbols-outlined">account_circle</span>
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Dashboard Content -->
+            <div class="content">
+                <!-- Overview Page -->
+                <div class="page" id="overviewPage">
+                    <div class="page-header">
+                        <div>
+                            <h3 class="page-title">Floor Overview</h3>
+                            <p class="page-subtitle">Real-time table monitoring for Level 2 Study Area.</p>
+                        </div>
+                        <div class="status-legend">
+                            <div class="status-item">
+                                <span class="status-dot quiet"></span>
+                                <span class="status-label">Quiet</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-dot moderate"></span>
+                                <span class="status-label">Moderate</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-dot noisy"></span>
+                                <span class="status-label">Noisy</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tables-grid" id="tablesGrid">
+                        <!-- Tables will be generated by JavaScript -->
+                    </div>
+                </div>
+
+                <!-- Logs Page -->
+                <div class="page hidden" id="logsPage">
+                    <div class="page-header">
+                        <h3 class="page-title">Seating Logs</h3>
+                        <p class="page-subtitle">Historical seating data and analytics.</p>
+                    </div>
+                    <div class="logs-container">
+                        <div class="log-entry">
+                            <span class="log-time">14:32</span>
+                            <span class="log-action">James Dorsey seated at Table A1</span>
+                        </div>
+                        <div class="log-entry">
+                            <span class="log-time">14:28</span>
+                            <span class="log-action">Sarah Kim seated at Table A1</span>
+                        </div>
+                        <div class="log-entry">
+                            <span class="log-time">14:15</span>
+                            <span class="log-action">Warning issued for Table A4</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings Page -->
+                <div class="page hidden" id="settingsPage">
+                    <div class="page-header">
+                        <h3 class="page-title">Settings</h3>
+                        <p class="page-subtitle">Configure dashboard preferences.</p>
+                    </div>
+                    <div class="settings-container">
+                        <div class="setting-item">
+                            <label class="setting-label">Auto-refresh Interval</label>
+                            <select class="setting-input" id="refreshInterval">
+                                <option value="5">5 seconds</option>
+                                <option value="10" selected>10 seconds</option>
+                                <option value="30">30 seconds</option>
+                                <option value="60">1 minute</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Warning Threshold</label>
+                            <select class="setting-input" id="warningThreshold">
+                                <option value="2" selected>2 warnings</option>
+                                <option value="3">3 warnings</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">Sound Alerts</label>
+                            <input type="checkbox" class="setting-checkbox" id="soundAlerts">
+                        </div>
+                        <div class="setting-item">
+                            <label class="setting-label">ESP-32 Status</label>
+                            <div class="esp-status">
+                                <span id="connectionStatus">Connected</span>
+                                <span id="sensorData">Temp: 22.5°C</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mobile Bottom Navigation -->
+            <nav class="mobile-nav">
+                <a href="#" class="mobile-nav-item active" data-page="overview">
+                    <span class="material-symbols-outlined">grid_view</span>
+                    <span>Overview</span>
+                </a>
+                <a href="#" class="mobile-nav-item" data-page="logs">
+                    <span class="material-symbols-outlined">history</span>
+                    <span>Logs</span>
+                </a>
+                <a href="#" class="mobile-nav-item" data-page="alerts">
+                    <span class="material-symbols-outlined">notifications</span>
+                    <span>Alerts</span>
+                </a>
+                <a href="#" class="mobile-nav-item" data-page="settings">
+                    <span class="material-symbols-outlined">settings</span>
+                    <span>Settings</span>
+                </a>
+            </nav>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
