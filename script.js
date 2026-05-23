@@ -1,7 +1,6 @@
 // ScholarTrack Firebase-only Dashboard
 // Architecture: ESP32 readings / QR scans -> Firebase Realtime Database -> Website
 // This file intentionally does NOT use /api/dashboard, /api/sensors, /api/command,
-// useFallbackData(), or random fake student IDs.
 
 (function () {
   "use strict";
