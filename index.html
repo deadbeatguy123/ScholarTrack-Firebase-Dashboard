@@ -58,13 +58,18 @@
       </nav>
 
       <div class="sidebar-footer">
-        <button class="generate-report-btn" onclick="generateReport()">
+        <button class="generate-report-btn" type="button" onclick="generateReport()">
           Generate Report
         </button>
       </div>
     </aside>
 
-    <button class="mobile-menu-toggle" id="mobileMenuToggle" aria-label="Toggle mobile menu">
+    <button
+      class="mobile-menu-toggle"
+      id="mobileMenuToggle"
+      type="button"
+      aria-label="Toggle mobile menu"
+    >
       <span class="material-symbols-outlined">menu</span>
     </button>
 
@@ -97,11 +102,11 @@
             />
           </div>
 
-          <button class="icon-btn" onclick="showNotifications()" aria-label="Notifications">
+          <button class="icon-btn" type="button" onclick="showNotifications()" aria-label="Notifications">
             <span class="material-symbols-outlined">notifications</span>
           </button>
 
-          <button class="icon-btn" onclick="showAccount()" aria-label="Account">
+          <button class="icon-btn" type="button" onclick="showAccount()" aria-label="Account">
             <span class="material-symbols-outlined">account_circle</span>
           </button>
         </div>
@@ -134,7 +139,7 @@
           </div>
 
           <div class="tables-grid" id="tablesGrid">
-            <!-- Table cards are rendered by script.js from Firebase data. -->
+            <!-- Firebase table cards render here. -->
           </div>
         </section>
 
@@ -224,6 +229,6 @@
     </a>
   </nav>
 
-  <script src="script.js?v=2"></script>
+  <script src="script.js?v=4"></script>
 </body>
 </html>
