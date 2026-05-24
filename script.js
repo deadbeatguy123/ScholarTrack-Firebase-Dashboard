@@ -1,22 +1,6 @@
-// ScholarTrack Firebase-only Dashboard
-// Architecture: ESP32 readings / QR scans -> Firebase Realtime Database -> Website
-// This file intentionally does NOT use /api/dashboard, /api/sensors, /api/command,
-
 (function () {
   "use strict";
 
-  console.log("ScholarTrack Firebase-only dashboard loaded.");
-
-  /*
-    CHANGE THIS ONLY IF YOUR FIREBASE REALTIME DATABASE URL IS DIFFERENT.
-
-    Expected Firebase path:
-    devices/unit_A/audio
-    devices/unit_A/qr_codes
-
-    Confirmed project mapping:
-    devices/unit_A -> Table A1
-  */
   const FIREBASE_DB_URL = "https://micropit-91298-default-rtdb.asia-southeast1.firebasedatabase.app";
 
   const TABLE_CONFIG = [
@@ -35,11 +19,10 @@
   const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 
   let firebaseDevices = {};
+  let dashboardData = createEmptyDashboardData();
   let refreshInterval = DEFAULT_REFRESH_INTERVAL_MS;
   let autoRefreshTimer = null;
   let lastSuccessfulFetchAt = null;
-
-  let dashboardData = createEmptyDashboardData();
 
   let sidebar = null;
   let mobileMenuToggle = null;
@@ -65,8 +48,6 @@
       },
       warnings: 0,
       sensors: {
-        temperature: 0,
-        humidity: 0,
         noiseLevel: 0
       }
     };
@@ -124,9 +105,7 @@
       }
     });
 
-    window.addEventListener("online", function () {
-      refreshData();
-    });
+    window.addEventListener("online", refreshData);
 
     window.addEventListener("offline", function () {
       updateConnectionStatus(false, "Browser offline");
@@ -141,9 +120,7 @@
       }
     });
 
-    window.addEventListener("beforeunload", function () {
-      stopAutoRefresh();
-    });
+    window.addEventListener("beforeunload", stopAutoRefresh);
   }
 
   function renderEmptyDashboard() {
@@ -160,12 +137,6 @@
   async function refreshData() {
     const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
 
-    if (!databaseUrl) {
-      updateConnectionStatus(false, "Missing Firebase URL");
-      console.error("FIREBASE_DB_URL is empty or invalid.");
-      return;
-    }
-
     try {
       const response = await fetch(`${databaseUrl}/devices.json?ts=${Date.now()}`, {
         method: "GET",
@@ -177,18 +148,9 @@
       }
 
       const data = await response.json();
-
-      if (isPlainObject(data) && data.error) {
-        throw new Error(`Firebase error: ${data.error}`);
-      }
-
       firebaseDevices = isPlainObject(data) ? data : {};
-      lastSuccessfulFetchAt = Date.now();
-
       dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
-
-      console.log("Firebase devices:", firebaseDevices);
-      console.log("Mapped dashboard tables:", dashboardData.tables);
+      lastSuccessfulFetchAt = Date.now();
 
       renderTables(searchInput ? searchInput.value : "");
       renderLogs();
@@ -203,36 +165,42 @@
 
   function mapFirebaseDevicesToDashboard(devices) {
     const tables = TABLE_CONFIG.map(function (tableConfig) {
-      const device = isPlainObject(devices[tableConfig.unitId]) ? devices[tableConfig.unitId] : {};
-      const audio = isPlainObject(device.audio) ? device.audio : {};
+      const device = isPlainObject(devices[tableConfig.unitId])
+        ? devices[tableConfig.unitId]
+        : {};
 
+      const audio = isPlainObject(device.audio) ? device.audio : {};
       const students = getCurrentStudentsFromDevice(device);
       const studentCount = students.length;
       const available = studentCount === 0;
 
-      /*
-        Strict occupancy rule:
-        - qr_codes/current_students entries make a table occupied.
-        - Audio alone never makes a table occupied.
-        - Missing devices such as unit_B, unit_C, etc. stay Available.
-      */
       let warnings = 0;
       let status = "quiet";
 
+      /*
+        Strict rule:
+        QR entries mean the table is occupied.
+        Audio alone does not make a table occupied.
+      */
       if (!available) {
         warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
-        status = getStatusFromAudio(audio, warnings, DEFAULT_MAX_WARNINGS);
+
+        if (warnings >= DEFAULT_MAX_WARNINGS) {
+          status = "critical";
+        } else {
+          status = getStatusFromAudio(audio);
+        }
       }
 
       return {
         id: tableConfig.id,
         unitId: tableConfig.unitId,
-        status: status,
-        warnings: warnings,
+        status,
+        warnings,
         maxWarnings: DEFAULT_MAX_WARNINGS,
-        studentCount: studentCount,
-        students: students,
-        available: available,
+        studentCount,
+        students,
+        available,
         noiseLevel: toNumber(audio.received_db, 0),
         updatedAt: audio.updated_at || device.updated_at || null
       };
@@ -251,15 +219,13 @@
     }, 0);
 
     return {
-      tables: tables,
+      tables,
       occupancy: {
         current: currentOccupancy,
         max: tables.length * SEATS_PER_TABLE
       },
       warnings: activeWarnings,
       sensors: {
-        temperature: 0,
-        humidity: 0,
         noiseLevel: highestNoise
       }
     };
@@ -325,12 +291,12 @@
     }
 
     return {
-      key: key,
-      payload: payload,
-      name: name,
-      studentId: studentId,
-      program: program,
-      scannedAt: scannedAt,
+      key,
+      payload,
+      name,
+      studentId,
+      program,
+      scannedAt,
       initials: getInitials(name)
     };
   }
@@ -338,6 +304,10 @@
   function getWarningCount(device, maxWarnings) {
     const audio = isPlainObject(device.audio) ? device.audio : {};
 
+    /*
+      ESP32 audio.level is only the current sound state.
+      It is NOT the accumulated warning count.
+    */
     const rawWarnings =
       device.warning_count ??
       device.warningCount ??
@@ -345,20 +315,15 @@
       audio.warning_count ??
       audio.warningCount ??
       audio.warnings ??
-      audio.level ??
       0;
 
     return clamp(Math.round(toNumber(rawWarnings, 0)), 0, maxWarnings);
   }
 
-  function getStatusFromAudio(audio, warnings, maxWarnings) {
-    if (warnings >= maxWarnings) {
-      return "critical";
-    }
-
+  function getStatusFromAudio(audio) {
     const manualStatus = String(audio.status || "").toLowerCase();
 
-    if (["quiet", "moderate", "noisy", "critical"].includes(manualStatus)) {
+    if (["quiet", "moderate", "noisy"].includes(manualStatus)) {
       return manualStatus;
     }
 
@@ -406,20 +371,7 @@
         })
       : dashboardData.tables;
 
-    if (filteredTables.length === 0) {
-      tablesGrid.innerHTML = `
-        <div class="table-card available">
-          <div class="available-content">
-            <span class="available-text">No matching table found</span>
-          </div>
-        </div>
-      `;
-      return;
-    }
-
-    tablesGrid.innerHTML = filteredTables.map(function (table) {
-      return createTableCard(table);
-    }).join("");
+    tablesGrid.innerHTML = filteredTables.map(createTableCard).join("");
   }
 
   function createTableCard(table) {
@@ -427,8 +379,8 @@
       return createAvailableTableCard(table);
     }
 
-    const isCritical = table.status === "critical";
-    const statusClass = sanitizeStatus(table.status);
+    const isCritical = table.status === "critical" || table.warnings >= table.maxWarnings;
+    const statusClass = sanitizeStatus(isCritical ? "critical" : table.status);
     const statusLabel = isCritical ? "Critical" : capitalize(statusClass);
 
     const firstStudent = table.students[0] || null;
@@ -437,74 +389,108 @@
       : "QR registered";
 
     return `
-      <div class="table-card ${isCritical ? "critical" : ""}">
-        <div class="table-header ${isCritical ? "critical-header" : ""}">
-          <span class="table-name">Table ${escapeHtml(table.id)}</span>
+      <article class="table-card smart-table-card ${isCritical ? "critical" : ""}">
+        <div class="smart-card-header">
+          <div class="smart-seat-icon">
+            <span class="material-symbols-outlined">event_seat</span>
+          </div>
 
-          <div class="table-status">
-            ${isCritical ? "" : `<span class="status-indicator ${statusClass}"></span>`}
-            <span class="status-text ${statusClass}">${escapeHtml(statusLabel)}</span>
-            ${isCritical ? '<span class="material-symbols-outlined">warning</span>' : ""}
+          <h4 class="smart-table-title">Table ${escapeHtml(table.id)}</h4>
+
+          <div class="smart-status-pill ${statusClass}">
+            <span class="smart-status-dot"></span>
+            <span>${escapeHtml(statusLabel)}</span>
           </div>
         </div>
 
-        <div class="${isCritical ? "critical-content" : "table-content"}">
-          <div class="warnings-section">
-            <span class="warnings-label ${isCritical ? "critical-warnings-label" : ""}">Warnings</span>
-
-            <div class="warnings-bar">
-              ${generateWarningBars(table.warnings, table.maxWarnings)}
-              <span class="warnings-count">${table.warnings}/${table.maxWarnings}</span>
-            </div>
-          </div>
-
-          <div class="students-section">
-            <span class="students-label">Seated Students</span>
-
-            <div class="student-item">
-              <div class="student-info">
-                <div class="student-avatar avatar-primary">ST</div>
-
-                <div class="student-details">
-                  <p class="student-name ${isCritical ? "critical-student-name" : ""}">
-                    ${table.studentCount} student${table.studentCount !== 1 ? "s" : ""}
-                  </p>
-
-                  <p class="student-id ${isCritical ? "critical-student-id" : ""}">
-                    ${escapeHtml(studentSubtext)}
-                  </p>
-                </div>
+        <div class="smart-card-content">
+          <section class="smart-warning-box ${isCritical ? "critical" : ""}">
+            <div class="smart-warning-row">
+              <div class="smart-warning-icon">
+                <span class="material-symbols-outlined">warning</span>
               </div>
 
-              <div class="student-actions">
-                <span class="material-symbols-outlined">more_vert</span>
+              <div class="smart-warning-title">Warnings</div>
+
+              <div class="smart-warning-bars">
+                ${generateWarningBars(table.warnings, table.maxWarnings)}
+              </div>
+
+              <div class="smart-warning-count">${table.warnings} / ${table.maxWarnings}</div>
+            </div>
+
+            ${
+              isCritical
+                ? `
+                  <button
+                    class="smart-dispatch-btn"
+                    type="button"
+                    onclick="dispatchIntervention('${escapeJsString(table.id)}')"
+                  >
+                    <span class="material-symbols-outlined">send</span>
+                    <span>Dispatch Intervention</span>
+                  </button>
+                `
+                : ""
+            }
+          </section>
+
+          <button
+            class="smart-students-box"
+            type="button"
+            onclick="showSeatedStudentsModal('${escapeJsString(table.id)}')"
+            aria-label="View seated students for Table ${escapeHtml(table.id)}"
+          >
+            <div class="smart-students-label">
+              <span class="smart-students-icon">
+                <span class="material-symbols-outlined">groups</span>
+              </span>
+              <span>Seated Students</span>
+            </div>
+
+            <div class="smart-students-main">
+              <div class="smart-avatar">
+                ${escapeHtml(firstStudent ? firstStudent.initials : "ST")}
+              </div>
+
+              <div class="smart-student-text">
+                <p>${table.studentCount} student${table.studentCount !== 1 ? "s" : ""}</p>
+                <span>${escapeHtml(studentSubtext)}</span>
+              </div>
+
+              <div class="smart-mini-chart" aria-hidden="true">
+                <i></i>
+                <i></i>
+                <i></i>
               </div>
             </div>
-          </div>
-
-          ${isCritical ? `<button class="intervention-btn" onclick="dispatchIntervention('${escapeJsString(table.id)}')">Dispatch Intervention</button>` : ""}
+          </button>
         </div>
-      </div>
+      </article>
     `;
   }
 
   function createAvailableTableCard(table) {
     return `
-      <div class="table-card available">
-        <div class="table-header">
-          <span class="table-name">Table ${escapeHtml(table.id)}</span>
+      <article class="table-card smart-table-card smart-available-card available">
+        <div class="smart-card-header">
+          <div class="smart-seat-icon muted">
+            <span class="material-symbols-outlined">event_seat</span>
+          </div>
 
-          <div class="table-status">
-            <span class="status-indicator quiet"></span>
-            <span class="status-text quiet">Quiet</span>
+          <h4 class="smart-table-title">Table ${escapeHtml(table.id)}</h4>
+
+          <div class="smart-status-pill quiet">
+            <span class="smart-status-dot"></span>
+            <span>Quiet</span>
           </div>
         </div>
 
-        <div class="available-content">
-          <span class="material-symbols-outlined available-icon">event_seat</span>
-          <span class="available-text">Available</span>
+        <div class="smart-available-body">
+          <span class="material-symbols-outlined">event_seat</span>
+          <p>Available</p>
         </div>
-      </div>
+      </article>
     `;
   }
 
@@ -512,7 +498,7 @@
     let bars = "";
 
     for (let i = 0; i < maxWarnings; i += 1) {
-      bars += `<div class="warning-bar-segment ${i < warnings ? "active" : ""}"></div>`;
+      bars += `<span class="warning-bar-segment ${i < warnings ? "active" : ""}"></span>`;
     }
 
     return bars;
@@ -586,9 +572,8 @@
     }
 
     const noiseLevel = toNumber(dashboardData.sensors.noiseLevel, 0);
-    const lastUpdateText = lastSuccessfulFetchAt ? ` · Updated ${formatTime(lastSuccessfulFetchAt)}` : "";
-
-    sensorDataElement.textContent = `Noise: ${noiseLevel.toFixed(2)}dB${lastUpdateText}`;
+    const updatedText = lastSuccessfulFetchAt ? ` · Updated ${formatTime(lastSuccessfulFetchAt)}` : "";
+    sensorDataElement.textContent = `Noise: ${noiseLevel.toFixed(2)}dB${updatedText}`;
   }
 
   function updateConnectionStatus(connected, text = "") {
@@ -599,7 +584,7 @@
     }
 
     statusElement.textContent = text || (connected ? "Connected" : "Offline");
-    statusElement.style.color = connected ? "#10b981" : "#ba1a1a";
+    statusElement.style.color = connected ? "#10b981" : "#dc2626";
   }
 
   function toggleMobileMenu() {
@@ -615,10 +600,6 @@
   }
 
   function navigateToPage(page) {
-    if (!page) {
-      return;
-    }
-
     document.querySelectorAll(".page").forEach(function (pageElement) {
       pageElement.classList.add("hidden");
     });
@@ -627,11 +608,6 @@
 
     if (selectedPage) {
       selectedPage.classList.remove("hidden");
-    } else {
-      const overviewPage = document.getElementById("overviewPage");
-      if (overviewPage) {
-        overviewPage.classList.remove("hidden");
-      }
     }
 
     document.querySelectorAll(".nav-item, .mobile-nav-item").forEach(function (item) {
@@ -653,6 +629,7 @@
     }
 
     const seconds = parseInt(refreshIntervalSelect.value, 10);
+
     refreshInterval = Number.isFinite(seconds) && seconds > 0
       ? seconds * 1000
       : DEFAULT_REFRESH_INTERVAL_MS;
@@ -722,19 +699,303 @@
       return;
     }
 
-    const message = activeTables.map(function (table) {
+    alert(activeTables.map(function (table) {
       return `${capitalize(table.status)}: Table ${table.id}`;
-    }).join("\n");
-
-    alert(message);
+    }).join("\n"));
   }
 
   function showAccount() {
     alert("ScholarTrack Firebase website dashboard.");
   }
 
+  function showSeatedStudentsModal(tableId) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    const overlay = ensureStudentModal();
+
+    const studentRows = table.students.length > 0
+      ? table.students.map(function (student, index) {
+          const displayName = student.name || "Registered Student";
+          const displayId = student.studentId || "No ID found";
+          const displayProgram = student.program || "Program not provided";
+          const displayPayload = student.payload || "";
+
+          return `
+            <div class="student-modal-row">
+              <div class="student-modal-avatar">
+                ${escapeHtml(student.initials || "ST")}
+              </div>
+
+              <div class="student-modal-info">
+                <div class="student-modal-name">${escapeHtml(displayName)}</div>
+
+                <div class="student-modal-meta">
+                  <span>ID: ${escapeHtml(displayId)}</span>
+                  <span>${escapeHtml(displayProgram)}</span>
+                </div>
+
+                ${
+                  displayPayload && displayPayload !== displayName
+                    ? `<div class="student-modal-payload">${escapeHtml(displayPayload)}</div>`
+                    : ""
+                }
+              </div>
+
+              <div class="student-modal-number">${index + 1}</div>
+            </div>
+          `;
+        }).join("")
+      : `
+        <div class="student-modal-empty">
+          No students are currently seated at this table.
+        </div>
+      `;
+
+    overlay.innerHTML = `
+      <div class="student-modal-card" role="dialog" aria-modal="true">
+        <div class="student-modal-header">
+          <div>
+            <p class="student-modal-eyebrow">Seated Students</p>
+            <h3>Table ${escapeHtml(table.id)}</h3>
+            <p>${table.studentCount} active QR entr${table.studentCount === 1 ? "y" : "ies"}</p>
+          </div>
+
+          <button class="student-modal-close" type="button" onclick="closeStudentsModal()">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        <div class="student-modal-list">
+          ${studentRows}
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function ensureStudentModal() {
+    let overlay = document.getElementById("studentModalOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "studentModalOverlay";
+    overlay.className = "student-modal-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeStudentsModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+
+    return overlay;
+  }
+
+  function closeStudentsModal() {
+    const overlay = document.getElementById("studentModalOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    document.body.classList.remove("modal-open");
+  }
+
   function dispatchIntervention(tableId) {
-    alert(`Intervention noted for Table ${tableId}.`);
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    showDispatchConfirmModal(table);
+  }
+
+  function showDispatchConfirmModal(table) {
+    const overlay = ensureDispatchConfirmModal();
+
+    overlay.innerHTML = `
+      <div class="dispatch-modal-card" role="dialog" aria-modal="true">
+        <div class="dispatch-modal-icon">
+          <span class="material-symbols-outlined">warning</span>
+        </div>
+
+        <h3>Dispatch intervention?</h3>
+
+        <p>
+         This will mark Table ${escapeHtml(table.id)} as handled and reset its warning count.
+        </p>
+
+        <div class="dispatch-modal-summary">
+          <div>
+            <span>Table</span>
+            <strong>${escapeHtml(table.id)}</strong>
+          </div>
+
+          <div>
+            <span>Current warnings</span>
+            <strong>${table.warnings} / ${table.maxWarnings}</strong>
+          </div>
+
+          <div>
+            <span>Seated students</span>
+            <strong>${table.studentCount}</strong>
+          </div>
+        </div>
+
+        <div class="dispatch-modal-actions">
+          <button type="button" class="dispatch-cancel-btn" onclick="closeDispatchConfirmModal()">
+            Cancel
+          </button>
+
+          <button type="button" class="dispatch-confirm-btn" onclick="confirmDispatchIntervention('${escapeJsString(table.id)}')">
+            Confirm Dispatch
+          </button>
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function ensureDispatchConfirmModal() {
+    let overlay = document.getElementById("dispatchConfirmOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "dispatchConfirmOverlay";
+    overlay.className = "dispatch-modal-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeDispatchConfirmModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+
+    return overlay;
+  }
+
+  function closeDispatchConfirmModal() {
+    const overlay = document.getElementById("dispatchConfirmOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    document.body.classList.remove("modal-open");
+  }
+
+  async function confirmDispatchIntervention(tableId) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    try {
+      await resetWarningCountForTable(table);
+
+      if (!isPlainObject(firebaseDevices[table.unitId])) {
+        firebaseDevices[table.unitId] = {};
+      }
+
+      firebaseDevices[table.unitId].warning_count = 0;
+      firebaseDevices[table.unitId].last_dispatch_status = "completed";
+      firebaseDevices[table.unitId].last_dispatch_local_at = Date.now();
+
+      if (isPlainObject(firebaseDevices[table.unitId].audio)) {
+        delete firebaseDevices[table.unitId].audio.warning_count;
+        delete firebaseDevices[table.unitId].audio.warningCount;
+        delete firebaseDevices[table.unitId].audio.warnings;
+      }
+
+      dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
+
+      renderTables(searchInput ? searchInput.value : "");
+      renderLogs();
+      updateStats();
+      updateSensorDisplay();
+
+      closeDispatchConfirmModal();
+    } catch (error) {
+      console.error("Failed to reset warning count:", error);
+      alert("Dispatch failed. Warning count was not reset. Check Firebase write rules.");
+    }
+  }
+
+  async function resetWarningCountForTable(table) {
+    const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
+    const unitPath = `devices/${encodeURIComponent(table.unitId)}`;
+    const unitUrl = `${databaseUrl}/${unitPath}.json?print=silent`;
+    const audioUrl = `${databaseUrl}/${unitPath}/audio.json?print=silent`;
+
+    const rootPatch = {
+      warning_count: 0,
+      warningCount: null,
+      warnings: null,
+      intervention_requested: false,
+      last_dispatch_status: "completed",
+      last_dispatch_at: {
+        ".sv": "timestamp"
+      }
+    };
+
+    const audioPatch = {
+      warning_count: 0,
+      warningCount: null,
+      warnings: null
+    };
+
+    const rootResponse = await fetch(unitUrl, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(rootPatch)
+    });
+
+    if (!rootResponse.ok) {
+      throw new Error(`Root warning reset failed: ${rootResponse.status}`);
+    }
+
+    const audioResponse = await fetch(audioUrl, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(audioPatch)
+    });
+
+    if (!audioResponse.ok) {
+      throw new Error(`Audio warning reset failed: ${audioResponse.status}`);
+    }
   }
 
   function getStudentSubtext(student, studentCount) {
@@ -875,5 +1136,9 @@
   window.showNotifications = showNotifications;
   window.showAccount = showAccount;
   window.dispatchIntervention = dispatchIntervention;
+  window.showSeatedStudentsModal = showSeatedStudentsModal;
+  window.closeStudentsModal = closeStudentsModal;
+  window.confirmDispatchIntervention = confirmDispatchIntervention;
+  window.closeDispatchConfirmModal = closeDispatchConfirmModal;
   window.refreshData = refreshData;
 })();
