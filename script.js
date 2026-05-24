@@ -17,24 +17,32 @@
   const SEATS_PER_TABLE = 4;
   const DEFAULT_MAX_WARNINGS = 3;
   const DEFAULT_REFRESH_INTERVAL_MS = 5000;
+  const OVERVIEW_TITLE_SCROLL_RANGE_PX = 150;
 
   let firebaseDevices = {};
   let dashboardData = createEmptyDashboardData();
   let refreshInterval = DEFAULT_REFRESH_INTERVAL_MS;
   let autoRefreshTimer = null;
   let lastSuccessfulFetchAt = null;
+  let scrollFrame = null;
 
+  const visibleNoiseTables = new Set();
+
+  let mainContent = null;
   let sidebar = null;
   let mobileMenuToggle = null;
   let tablesGrid = null;
   let searchInput = null;
+  let searchClearBtn = null;
   let refreshIntervalSelect = null;
   let logsContainer = null;
+  let contentArea = null;
 
   document.addEventListener("DOMContentLoaded", function () {
     initializeElements();
     setupEventListeners();
     renderEmptyDashboard();
+    setHeaderMode("overview");
     refreshData();
     startAutoRefresh();
   });
@@ -54,12 +62,15 @@
   }
 
   function initializeElements() {
+    mainContent = document.getElementById("mainContent");
     sidebar = document.getElementById("sidebar");
     mobileMenuToggle = document.getElementById("mobileMenuToggle");
     tablesGrid = document.getElementById("tablesGrid");
     searchInput = document.getElementById("searchInput");
+    searchClearBtn = document.getElementById("searchClearBtn");
     refreshIntervalSelect = document.getElementById("refreshInterval");
     logsContainer = document.querySelector(".logs-container");
+    contentArea = document.getElementById("contentArea");
   }
 
   function setupEventListeners() {
@@ -85,11 +96,31 @@
     if (searchInput) {
       searchInput.addEventListener("input", function (event) {
         renderTables(event.target.value);
+        updateSearchClearButton();
+      });
+    }
+
+    if (searchClearBtn) {
+      searchClearBtn.addEventListener("click", function () {
+        if (!searchInput) {
+          return;
+        }
+
+        searchInput.value = "";
+        updateSearchClearButton();
+        renderTables("");
+        searchInput.focus();
       });
     }
 
     if (refreshIntervalSelect) {
       refreshIntervalSelect.addEventListener("change", updateRefreshInterval);
+    }
+
+    if (contentArea) {
+      contentArea.addEventListener("scroll", function () {
+        requestScrollMotionUpdate();
+      }, { passive: true });
     }
 
     document.addEventListener("click", function (event) {
@@ -105,6 +136,7 @@
       }
     });
 
+    window.addEventListener("resize", requestScrollMotionUpdate);
     window.addEventListener("online", refreshData);
 
     window.addEventListener("offline", function () {
@@ -123,6 +155,70 @@
     window.addEventListener("beforeunload", stopAutoRefresh);
   }
 
+  function requestScrollMotionUpdate() {
+    if (scrollFrame) {
+      return;
+    }
+
+    scrollFrame = window.requestAnimationFrame(function () {
+      scrollFrame = null;
+      updateOverviewTitleMotion();
+    });
+  }
+
+  function updateOverviewTitleMotion() {
+    if (!mainContent || !contentArea) {
+      return;
+    }
+
+    const overviewPage = document.getElementById("overviewPage");
+    const isOverviewVisible = overviewPage && !overviewPage.classList.contains("hidden");
+
+    if (!isOverviewVisible) {
+      setOverviewTitleMotionProgress(0);
+      return;
+    }
+
+    const scrollTop = Math.max(contentArea.scrollTop, 0);
+    const progress = clamp(scrollTop / OVERVIEW_TITLE_SCROLL_RANGE_PX, 0, 1);
+
+    setOverviewTitleMotionProgress(progress);
+  }
+
+  function setOverviewTitleMotionProgress(progress) {
+    if (!mainContent) {
+      return;
+    }
+
+    const p = clamp(progress, 0, 1);
+    const opacity = Math.max(1 - p, 0);
+
+    mainContent.style.setProperty("--overview-title-shift", `${-130 * p}px`);
+    mainContent.style.setProperty("--overview-legend-shift", `${135 * p}px`);
+    mainContent.style.setProperty("--overview-title-opacity", opacity.toFixed(3));
+    mainContent.style.setProperty("--overview-legend-opacity", opacity.toFixed(3));
+
+    mainContent.classList.toggle("overview-page-header-hidden", p >= 0.985);
+  }
+
+  function setHeaderMode(page) {
+    if (!mainContent) {
+      return;
+    }
+
+    const shouldHideHeader = page !== "overview";
+    mainContent.classList.toggle("header-hidden", shouldHideHeader);
+
+    if (shouldHideHeader) {
+      setOverviewTitleMotionProgress(0);
+      return;
+    }
+
+    setTimeout(function () {
+      updateOverviewTitleMotion();
+    }, 30);
+  }
+
   function renderEmptyDashboard() {
     firebaseDevices = {};
     dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
@@ -132,6 +228,7 @@
     updateStats();
     updateSensorDisplay();
     updateConnectionStatus(false, "Waiting for Firebase");
+    updateSearchClearButton();
   }
 
   async function refreshData() {
@@ -153,86 +250,102 @@
       dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
       lastSuccessfulFetchAt = Date.now();
 
+      pruneNoiseViewState();
       renderTables(searchInput ? searchInput.value : "");
       renderLogs();
       updateStats();
       updateSensorDisplay();
       updateConnectionStatus(true, "Connected");
+      updateSearchClearButton();
+      requestScrollMotionUpdate();
     } catch (error) {
       console.error("Firebase fetch error:", error);
       updateConnectionStatus(false, "Firebase read failed");
     }
   }
 
-  function mapFirebaseDevicesToDashboard(devices) {
-  const tables = TABLE_CONFIG.map(function (tableConfig) {
-    const device = isPlainObject(devices[tableConfig.unitId])
-      ? devices[tableConfig.unitId]
-      : {};
+  function pruneNoiseViewState() {
+    const validTableIds = new Set(dashboardData.tables.map(function (table) {
+      return table.id;
+    }));
 
-    const audio = isPlainObject(device.audio) ? device.audio : {};
-    const students = getCurrentStudentsFromDevice(device);
-    const studentCount = students.length;
-    const available = studentCount === 0;
-
-    let warnings = 0;
-    let status = "quiet";
-
-    /*
-      Same rule for every table:
-      - QR/current_students entries make the table occupied.
-      - Audio alone does not make the table occupied.
-      - If occupied, audio determines Quiet/Moderate/Critical.
-      - warning_count determines when Dispatch Intervention appears.
-    */
-    if (!available) {
-      warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
-
-      if (warnings >= DEFAULT_MAX_WARNINGS) {
-        status = "critical";
-      } else {
-        status = getStatusFromAudio(audio);
+    Array.from(visibleNoiseTables).forEach(function (tableId) {
+      if (!validTableIds.has(tableId)) {
+        visibleNoiseTables.delete(tableId);
       }
-    }
+    });
+  }
+
+  function mapFirebaseDevicesToDashboard(devices) {
+    const tables = TABLE_CONFIG.map(function (tableConfig) {
+      const device = isPlainObject(devices[tableConfig.unitId])
+        ? devices[tableConfig.unitId]
+        : {};
+
+      const audio = isPlainObject(device.audio) ? device.audio : {};
+      const students = getCurrentStudentsFromDevice(device);
+      const studentCount = students.length;
+      const available = studentCount === 0;
+
+      const noisyThreshold = toNumber(audio.noisy_threshold, 83);
+      const loudThreshold = toNumber(audio.loud_threshold, 90);
+      const receivedDb = toNumber(audio.received_db, 0);
+      const audioLevel = Number.isFinite(Number(audio.level)) ? Number(audio.level) : null;
+
+      let warnings = 0;
+      let status = "quiet";
+
+      if (!available) {
+        warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
+
+        if (warnings >= DEFAULT_MAX_WARNINGS) {
+          status = "critical";
+        } else {
+          status = getStatusFromAudio(audio);
+        }
+      }
+
+      return {
+        id: tableConfig.id,
+        unitId: tableConfig.unitId,
+        status,
+        warnings,
+        maxWarnings: DEFAULT_MAX_WARNINGS,
+        studentCount,
+        students,
+        available,
+        noiseLevel: receivedDb,
+        noisyThreshold,
+        loudThreshold,
+        audioLevel,
+        updatedAt: audio.updated_at || device.updated_at || null
+      };
+    });
+
+    const currentOccupancy = tables.reduce(function (sum, table) {
+      return sum + table.studentCount;
+    }, 0);
+
+    const activeWarnings = tables.reduce(function (sum, table) {
+      return sum + table.warnings;
+    }, 0);
+
+    const highestNoise = tables.reduce(function (max, table) {
+      return Math.max(max, table.noiseLevel || 0);
+    }, 0);
 
     return {
-      id: tableConfig.id,
-      unitId: tableConfig.unitId,
-      status,
-      warnings,
-      maxWarnings: DEFAULT_MAX_WARNINGS,
-      studentCount,
-      students,
-      available,
-      noiseLevel: toNumber(audio.received_db, 0),
-      updatedAt: audio.updated_at || device.updated_at || null
+      tables,
+      occupancy: {
+        current: currentOccupancy,
+        max: tables.length * SEATS_PER_TABLE
+      },
+      warnings: activeWarnings,
+      sensors: {
+        noiseLevel: highestNoise
+      }
     };
-  });
-
-  const currentOccupancy = tables.reduce(function (sum, table) {
-    return sum + table.studentCount;
-  }, 0);
-
-  const activeWarnings = tables.reduce(function (sum, table) {
-    return sum + table.warnings;
-  }, 0);
-
-  const highestNoise = tables.reduce(function (max, table) {
-    return Math.max(max, table.noiseLevel || 0);
-  }, 0);
-
-  return {
-    tables,
-    occupancy: {
-      current: currentOccupancy,
-      max: tables.length * SEATS_PER_TABLE
-    },
-    warnings: activeWarnings,
-    sensors: {
-      noiseLevel: highestNoise
-    }
-  };
-}
+  }
 
   function getCurrentStudentsFromDevice(device) {
     const source = device.current_students || device.qr_codes || {};
@@ -320,58 +433,48 @@
   }
 
   function getStatusFromAudio(audio) {
-  /*
-    ESP32 audio.level meaning:
-    0 = quiet
-    1 = noisy/moderate level
-    2 = loud/critical level
+    const manualStatus = String(audio.status || "").toLowerCase().trim();
 
-    This is NOT the warning count.
-    It is only the current sound state.
-  */
+    if (["quiet", "normal", "silent"].includes(manualStatus)) {
+      return "quiet";
+    }
 
-  const manualStatus = String(audio.status || "").toLowerCase().trim();
+    if (["moderate", "noise"].includes(manualStatus)) {
+      return "moderate";
+    }
 
-  if (["quiet", "normal", "silent"].includes(manualStatus)) {
-    return "quiet";
-  }
-
-  if (["moderate", "noisy", "noise"].includes(manualStatus)) {
-    return "moderate";
-  }
-
-  if (["critical", "loud", "very_loud", "too_loud"].includes(manualStatus)) {
-    return "critical";
-  }
-
-  const level = Number(audio.level);
-
-  if (Number.isFinite(level)) {
-    if (level >= 2) {
+    if (["critical", "noisy", "loud", "very_loud", "too_loud"].includes(manualStatus)) {
       return "critical";
     }
 
-    if (level >= 1) {
+    const level = Number(audio.level);
+
+    if (Number.isFinite(level)) {
+      if (level >= 2) {
+        return "critical";
+      }
+
+      if (level >= 1) {
+        return "moderate";
+      }
+
+      return "quiet";
+    }
+
+    const receivedDb = toNumber(audio.received_db, 0);
+    const noisyThreshold = toNumber(audio.noisy_threshold, 83);
+    const loudThreshold = toNumber(audio.loud_threshold, 90);
+
+    if (receivedDb >= loudThreshold) {
+      return "critical";
+    }
+
+    if (receivedDb >= noisyThreshold) {
       return "moderate";
     }
 
     return "quiet";
   }
-
-  const receivedDb = toNumber(audio.received_db, 0);
-  const noisyThreshold = toNumber(audio.noisy_threshold, 83);
-  const loudThreshold = toNumber(audio.loud_threshold, 90);
-
-  if (receivedDb >= loudThreshold) {
-    return "critical";
-  }
-
-  if (receivedDb >= noisyThreshold) {
-    return "moderate";
-  }
-
-  return "quiet";
-}
 
   function renderTables(searchTerm = "") {
     if (!tablesGrid) {
@@ -406,97 +509,109 @@
   }
 
   function createTableCard(table) {
-  if (table.available) {
-    return createAvailableTableCard(table);
+    const noiseViewOpen = visibleNoiseTables.has(table.id);
+
+    if (table.available) {
+      return createAvailableTableCard(table, noiseViewOpen);
+    }
+
+    const isDispatchReady = table.warnings >= table.maxWarnings;
+    const statusClass = sanitizeStatus(isDispatchReady ? "critical" : table.status);
+    const statusLabel = capitalize(statusClass);
+    const firstStudent = table.students[0] || null;
+
+    return `
+      <article class="table-card occupied-card ${isDispatchReady ? "critical" : ""} ${noiseViewOpen ? "noise-mode" : ""}">
+        <div class="table-card-header">
+          <div class="seat-icon">
+            <span class="material-symbols-outlined">event_seat</span>
+          </div>
+
+          <h4>Table ${escapeHtml(table.id)}</h4>
+
+          ${createStatusToggle(table, statusClass, statusLabel, noiseViewOpen)}
+        </div>
+
+        ${
+          noiseViewOpen
+            ? createNoiseViewBody(table, isDispatchReady)
+            : `
+              <div class="table-card-body">
+                <section class="warning-box ${isDispatchReady ? "critical" : ""}">
+                  <div class="warning-row">
+                    <button
+                      class="warning-reset-button"
+                      type="button"
+                      onclick="showWarningResetModal('${escapeJsString(table.id)}')"
+                      aria-label="Reset warning count for Table ${escapeHtml(table.id)}"
+                      title="Reset warnings"
+                    >
+                      <span class="material-symbols-outlined warning-symbol">warning</span>
+                      <span class="material-symbols-outlined reset-symbol">close</span>
+                    </button>
+
+                    <div class="warning-label">Warnings</div>
+
+                    <div class="warning-bars">
+                      ${generateWarningBars(table.warnings, table.maxWarnings)}
+                    </div>
+                  </div>
+
+                  ${
+                    isDispatchReady
+                      ? `
+                        <button
+                          class="dispatch-btn"
+                          type="button"
+                          onclick="dispatchIntervention('${escapeJsString(table.id)}')"
+                        >
+                          <span class="material-symbols-outlined">send</span>
+                          <span>Dispatch Intervention</span>
+                        </button>
+                      `
+                      : ""
+                  }
+                </section>
+
+                <button
+                  class="students-box"
+                  type="button"
+                  onclick="showSeatedStudentsModal('${escapeJsString(table.id)}')"
+                  aria-label="View seated students for Table ${escapeHtml(table.id)}"
+                >
+                  <div class="students-label">
+                    <span class="students-label-icon">
+                      <span class="material-symbols-outlined">groups</span>
+                    </span>
+                    <span>Seated Students</span>
+                  </div>
+
+                  <div class="students-main">
+                    <div class="student-avatar">
+                      ${escapeHtml(firstStudent ? firstStudent.initials : "ST")}
+                    </div>
+
+                    <div class="student-text">
+                      <p>${table.studentCount} student${table.studentCount !== 1 ? "s" : ""}</p>
+                    </div>
+
+                    <div class="student-chart" aria-hidden="true">
+                      <i></i>
+                      <i></i>
+                      <i></i>
+                    </div>
+                  </div>
+                </button>
+              </div>
+            `
+        }
+      </article>
+    `;
   }
 
-  const isDispatchReady = table.warnings >= table.maxWarnings;
-  const statusClass = sanitizeStatus(isDispatchReady ? "critical" : table.status);
-  const statusLabel = capitalize(statusClass);
-  const firstStudent = table.students[0] || null;
-
-  return `
-    <article class="table-card occupied-card ${isDispatchReady ? "critical" : ""}">
-      <div class="table-card-header">
-        <div class="seat-icon">
-          <span class="material-symbols-outlined">event_seat</span>
-        </div>
-
-        <h4>Table ${escapeHtml(table.id)}</h4>
-
-        <div class="table-status-pill ${statusClass}">
-          <span></span>
-          <strong>${escapeHtml(statusLabel)}</strong>
-        </div>
-      </div>
-
-      <div class="table-card-body">
-        <section class="warning-box ${isDispatchReady ? "critical" : ""}">
-          <div class="warning-row no-warning-counter">
-            <div class="warning-icon">
-              <span class="material-symbols-outlined">warning</span>
-            </div>
-
-            <div class="warning-label">Warnings</div>
-
-            <div class="warning-bars">
-              ${generateWarningBars(table.warnings, table.maxWarnings)}
-            </div>
-          </div>
-
-          ${
-            isDispatchReady
-              ? `
-                <button
-                  class="dispatch-btn"
-                  type="button"
-                  onclick="dispatchIntervention('${escapeJsString(table.id)}')"
-                >
-                  <span class="material-symbols-outlined">send</span>
-                  <span>Dispatch Intervention</span>
-                </button>
-              `
-              : ""
-          }
-        </section>
-
-        <button
-          class="students-box"
-          type="button"
-          onclick="showSeatedStudentsModal('${escapeJsString(table.id)}')"
-          aria-label="View seated students for Table ${escapeHtml(table.id)}"
-        >
-          <div class="students-label">
-            <span class="students-label-icon">
-              <span class="material-symbols-outlined">groups</span>
-            </span>
-            <span>Seated Students</span>
-          </div>
-
-          <div class="students-main">
-            <div class="student-avatar">
-              ${escapeHtml(firstStudent ? firstStudent.initials : "ST")}
-            </div>
-
-            <div class="student-text">
-              <p>${table.studentCount} student${table.studentCount !== 1 ? "s" : ""}</p>
-            </div>
-
-            <div class="student-chart" aria-hidden="true">
-              <i></i>
-              <i></i>
-              <i></i>
-            </div>
-          </div>
-        </button>
-      </div>
-    </article>
-  `;
-}
-
-  function createAvailableTableCard(table) {
+  function createAvailableTableCard(table, noiseViewOpen) {
     return `
-      <article class="table-card available-card available">
+      <article class="table-card available-card available ${noiseViewOpen ? "noise-mode" : ""}">
         <div class="table-card-header">
           <div class="seat-icon muted">
             <span class="material-symbols-outlined">event_seat</span>
@@ -504,18 +619,133 @@
 
           <h4>Table ${escapeHtml(table.id)}</h4>
 
-          <div class="table-status-pill quiet">
-            <span></span>
-            <strong>Quiet</strong>
-          </div>
+          ${createStatusToggle(table, "quiet", "Quiet", noiseViewOpen)}
         </div>
 
-        <div class="available-body">
-          <span class="material-symbols-outlined">event_seat</span>
-          <p>Available</p>
-        </div>
+        ${
+          noiseViewOpen
+            ? createNoiseViewBody(table, false)
+            : `
+              <div class="available-body">
+                <span class="material-symbols-outlined">event_seat</span>
+                <p>Available</p>
+              </div>
+            `
+        }
       </article>
     `;
+  }
+
+  function createStatusToggle(table, statusClass, statusLabel, noiseViewOpen) {
+    if (noiseViewOpen) {
+      return `
+        <button
+          class="noise-close-button"
+          type="button"
+          onclick="toggleNoiseView('${escapeJsString(table.id)}')"
+          aria-label="Close noise level view for Table ${escapeHtml(table.id)}"
+          title="Close noise view"
+        >
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      `;
+    }
+
+    return `
+      <button
+        class="table-status-pill status-toggle-button ${statusClass}"
+        type="button"
+        onclick="toggleNoiseView('${escapeJsString(table.id)}')"
+        aria-label="View current noise level for Table ${escapeHtml(table.id)}"
+        title="View noise level"
+      >
+        <span></span>
+        <strong>${escapeHtml(statusLabel)}</strong>
+      </button>
+    `;
+  }
+
+  function createNoiseViewBody(table, isDispatchReady) {
+    const noiseLevel = toNumber(table.noiseLevel, 0);
+    const scale = getNoiseScale(table);
+
+    return `
+      <div class="table-card-body noise-view-body">
+        <section
+          class="noise-visual-panel"
+          style="
+            --noise-percent: ${scale.noisePercent}%;
+            --quiet-solid-end: ${scale.quietSolidEnd}%;
+            --moderate-start: ${scale.moderateStart}%;
+            --critical-start: ${scale.criticalStart}%;
+            --critical-blend-end: ${scale.criticalBlendEnd}%;
+          "
+        >
+          <div class="noise-visual-header">
+            <div>
+              <span class="noise-eyebrow">Current Noise Level</span>
+              <strong>${noiseLevel.toFixed(2)} dB</strong>
+            </div>
+          </div>
+
+          <div class="noise-meter-shell">
+            <div class="noise-gradient-meter" aria-label="Noise level gradient meter">
+              <span class="noise-meter-cover"></span>
+            </div>
+
+            <div class="noise-meter-labels">
+              <span>Quiet</span>
+              <span>Moderate</span>
+              <span>Critical</span>
+            </div>
+          </div>
+        </section>
+
+        ${
+          isDispatchReady
+            ? `
+              <button
+                class="dispatch-btn noise-dispatch-btn"
+                type="button"
+                onclick="dispatchIntervention('${escapeJsString(table.id)}')"
+              >
+                <span class="material-symbols-outlined">send</span>
+                <span>Dispatch Intervention</span>
+              </button>
+            `
+            : ""
+        }
+      </div>
+    `;
+  }
+
+  function getNoiseScale(table) {
+    const noiseLevel = toNumber(table.noiseLevel, 0);
+    const noisyThreshold = Math.max(toNumber(table.noisyThreshold, 83), 1);
+    const loudThreshold = Math.max(toNumber(table.loudThreshold, 90), noisyThreshold + 1);
+    const upperBound = Math.max(loudThreshold + 10, 100);
+
+    const noisePercent = clamp((noiseLevel / upperBound) * 100, 0, 100);
+    const moderateStart = clamp((noisyThreshold / upperBound) * 100, 0, 96);
+    const criticalStart = clamp((loudThreshold / upperBound) * 100, moderateStart + 1, 98);
+
+    return {
+      noisePercent: roundToOne(noisePercent),
+      moderateStart: roundToOne(moderateStart),
+      quietSolidEnd: roundToOne(Math.max(moderateStart - 6, 0)),
+      criticalStart: roundToOne(criticalStart),
+      criticalBlendEnd: roundToOne(Math.min(criticalStart + 6, 100))
+    };
+  }
+
+  function toggleNoiseView(tableId) {
+    if (visibleNoiseTables.has(tableId)) {
+      visibleNoiseTables.delete(tableId);
+    } else {
+      visibleNoiseTables.add(tableId);
+    }
+
+    renderTables(searchInput ? searchInput.value : "");
   }
 
   function generateWarningBars(warnings, maxWarnings) {
@@ -586,6 +816,66 @@
     if (warningsElement) {
       warningsElement.textContent = `${String(dashboardData.warnings).padStart(2, "0")} Active`;
     }
+
+    updateHeaderPopovers();
+  }
+
+  function updateHeaderPopovers() {
+    const current = dashboardData.occupancy.current;
+    const max = dashboardData.occupancy.max;
+    const available = Math.max(max - current, 0);
+    const occupancyPercent = max > 0 ? Math.round((current / max) * 1000) / 10 : 0;
+
+    const donut = document.getElementById("occupancyDonut");
+    const percentText = document.getElementById("occupancyPercent");
+    const occupiedSeatsText = document.getElementById("occupiedSeatsTooltip");
+    const availableSeatsText = document.getElementById("availableSeatsTooltip");
+    const warningTableList = document.getElementById("warningTableList");
+
+    if (donut) {
+      donut.style.setProperty("--occupancy-percent", `${occupancyPercent}%`);
+    }
+
+    if (percentText) {
+      percentText.textContent = `${occupancyPercent}%`;
+    }
+
+    if (occupiedSeatsText) {
+      occupiedSeatsText.textContent = `${current} seat${current === 1 ? "" : "s"}`;
+    }
+
+    if (availableSeatsText) {
+      availableSeatsText.textContent = `${available} seat${available === 1 ? "" : "s"}`;
+    }
+
+    if (warningTableList) {
+      const warningTables = dashboardData.tables.filter(function (table) {
+        return table.warnings > 0;
+      });
+
+      if (warningTables.length === 0) {
+        warningTableList.innerHTML = `<div class="empty-warning-row">No active warnings.</div>`;
+        return;
+      }
+
+      warningTableList.innerHTML = warningTables.map(function (table) {
+        return `
+          <div class="warning-table-row">
+            <span>Table ${escapeHtml(table.id)}</span>
+            <strong>${table.warnings}</strong>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  function updateSearchClearButton() {
+    if (!searchInput || !searchClearBtn) {
+      return;
+    }
+
+    const hasValue = searchInput.value.trim().length > 0;
+    searchClearBtn.classList.toggle("visible", hasValue);
   }
 
   function updateSensorDisplay() {
@@ -609,6 +899,27 @@
 
     statusElement.textContent = text || (connected ? "Connected" : "Offline");
     statusElement.style.color = connected ? "#10b981" : "#dc2626";
+  }
+
+  function goHome() {
+    if (searchInput) {
+      searchInput.value = "";
+      updateSearchClearButton();
+    }
+
+    visibleNoiseTables.clear();
+
+    navigateToPage("overview");
+    renderTables("");
+
+    if (contentArea) {
+      contentArea.scrollTo({
+        top: 0,
+        behavior: "smooth"
+      });
+    }
+
+    closeMobileMenu();
   }
 
   function toggleMobileMenu() {
@@ -641,6 +952,15 @@
         item.classList.add("active");
       }
     });
+
+    setHeaderMode(page);
+
+    if (contentArea && page !== "overview") {
+      contentArea.scrollTo({
+        top: 0,
+        behavior: "smooth"
+      });
+    }
 
     if (window.innerWidth <= 768) {
       closeMobileMenu();
@@ -706,16 +1026,16 @@
 
   function showNotifications() {
     const activeTables = dashboardData.tables.filter(function (table) {
-      return table.studentCount > 0 && (table.status === "noisy" || table.status === "critical");
+      return table.studentCount > 0 && table.status === "critical";
     });
 
     if (activeTables.length === 0) {
-      alert("No active noisy or critical occupied tables.");
+      alert("No active critical occupied tables.");
       return;
     }
 
     alert(activeTables.map(function (table) {
-      return `${capitalize(table.status)}: Table ${table.id}`;
+      return `Critical: Table ${table.id}`;
     }).join("\n"));
   }
 
@@ -935,34 +1255,189 @@
 
     try {
       downloadDispatchCsv(table);
-      await resetWarningCountForTable(table);
+      await resetWarningCountForTable(table, "dispatch");
 
-      if (!isPlainObject(firebaseDevices[table.unitId])) {
-        firebaseDevices[table.unitId] = {};
-      }
-
-      firebaseDevices[table.unitId].warning_count = 0;
-      firebaseDevices[table.unitId].last_dispatch_status = "completed";
-      firebaseDevices[table.unitId].last_dispatch_local_at = Date.now();
-
-      if (isPlainObject(firebaseDevices[table.unitId].audio)) {
-        delete firebaseDevices[table.unitId].audio.warning_count;
-        delete firebaseDevices[table.unitId].audio.warningCount;
-        delete firebaseDevices[table.unitId].audio.warnings;
-      }
-
-      dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
-
-      renderTables(searchInput ? searchInput.value : "");
-      renderLogs();
-      updateStats();
-      updateSensorDisplay();
+      updateLocalWarningCount(table, 0);
 
       closeDispatchConfirmModal();
     } catch (error) {
       console.error("Failed to complete dispatch:", error);
       alert("Dispatch failed. The CSV file may have downloaded, but the warning count was not reset. Check Firebase write rules.");
     }
+  }
+
+  function showWarningResetModal(tableId) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    const overlay = ensureWarningResetModal();
+
+    if (table.warnings <= 0) {
+      overlay.innerHTML = `
+        <div class="dispatch-modal-card no-warning-modal-card" role="dialog" aria-modal="true">
+          <div class="dispatch-modal-icon reset-modal-icon">
+            <span class="material-symbols-outlined">check_circle</span>
+          </div>
+
+          <h3>No warnings recorded</h3>
+
+          <p>
+            Table ${escapeHtml(table.id)} currently has no active warnings to reset.
+          </p>
+
+          <div class="dispatch-modal-summary">
+            <div>
+              <span>Table</span>
+              <strong>${escapeHtml(table.id)}</strong>
+            </div>
+
+            <div>
+              <span>Current warnings</span>
+              <strong>${table.warnings} / ${table.maxWarnings}</strong>
+            </div>
+
+            <div>
+              <span>Seated students</span>
+              <strong>${table.studentCount}</strong>
+            </div>
+          </div>
+
+          <div class="dispatch-modal-actions single-action">
+            <button type="button" class="dispatch-cancel-btn modal-wide-btn" onclick="closeWarningResetModal()">
+              Close
+            </button>
+          </div>
+        </div>
+      `;
+
+      overlay.classList.remove("hidden");
+      document.body.classList.add("modal-open");
+      return;
+    }
+
+    overlay.innerHTML = `
+      <div class="dispatch-modal-card" role="dialog" aria-modal="true">
+        <div class="dispatch-modal-icon reset-modal-icon">
+          <span class="material-symbols-outlined">restart_alt</span>
+        </div>
+
+        <h3>Reset warnings?</h3>
+
+        <p>
+          Are you sure you want to reset this table's warning count?
+        </p>
+
+        <div class="dispatch-modal-summary">
+          <div>
+            <span>Table</span>
+            <strong>${escapeHtml(table.id)}</strong>
+          </div>
+
+          <div>
+            <span>Current warnings</span>
+            <strong>${table.warnings} / ${table.maxWarnings}</strong>
+          </div>
+
+          <div>
+            <span>Seated students</span>
+            <strong>${table.studentCount}</strong>
+          </div>
+        </div>
+
+        <div class="dispatch-modal-actions">
+          <button type="button" class="dispatch-cancel-btn" onclick="closeWarningResetModal()">
+            Cancel
+          </button>
+
+          <button type="button" class="dispatch-confirm-btn" onclick="confirmWarningReset('${escapeJsString(table.id)}')">
+            Reset Warnings
+          </button>
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function ensureWarningResetModal() {
+    let overlay = document.getElementById("warningResetOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "warningResetOverlay";
+    overlay.className = "modal-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeWarningResetModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function closeWarningResetModal() {
+    const overlay = document.getElementById("warningResetOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    document.body.classList.remove("modal-open");
+  }
+
+  async function confirmWarningReset(tableId) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    try {
+      await resetWarningCountForTable(table, "manual_reset");
+      updateLocalWarningCount(table, 0);
+      closeWarningResetModal();
+    } catch (error) {
+      console.error("Failed to reset warning count:", error);
+      alert("Warning reset failed. Check Firebase write rules.");
+    }
+  }
+
+  function updateLocalWarningCount(table, count) {
+    if (!isPlainObject(firebaseDevices[table.unitId])) {
+      firebaseDevices[table.unitId] = {};
+    }
+
+    firebaseDevices[table.unitId].warning_count = count;
+    firebaseDevices[table.unitId].last_warning_reset_local_at = Date.now();
+
+    if (isPlainObject(firebaseDevices[table.unitId].audio)) {
+      delete firebaseDevices[table.unitId].audio.warning_count;
+      delete firebaseDevices[table.unitId].audio.warningCount;
+      delete firebaseDevices[table.unitId].audio.warnings;
+    }
+
+    dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
+
+    renderTables(searchInput ? searchInput.value : "");
+    renderLogs();
+    updateStats();
+    updateSensorDisplay();
   }
 
   function downloadDispatchCsv(table) {
@@ -1007,7 +1482,7 @@
     );
   }
 
-  async function resetWarningCountForTable(table) {
+  async function resetWarningCountForTable(table, reason) {
     const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
     const unitPath = `devices/${encodeURIComponent(table.unitId)}`;
     const unitUrl = `${databaseUrl}/${unitPath}.json?print=silent`;
@@ -1017,12 +1492,19 @@
       warning_count: 0,
       warningCount: null,
       warnings: null,
-      intervention_requested: false,
-      last_dispatch_status: "completed",
-      last_dispatch_at: {
+      last_warning_reset_reason: reason || "manual_reset",
+      last_warning_reset_at: {
         ".sv": "timestamp"
       }
     };
+
+    if (reason === "dispatch") {
+      rootPatch.intervention_requested = false;
+      rootPatch.last_dispatch_status = "completed";
+      rootPatch.last_dispatch_at = {
+        ".sv": "timestamp"
+      };
+    }
 
     const audioPatch = {
       warning_count: 0,
@@ -1118,6 +1600,10 @@
     return Number.isFinite(number) ? number : fallback;
   }
 
+  function roundToOne(value) {
+    return Math.round(value * 10) / 10;
+  }
+
   function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
   }
@@ -1128,18 +1614,18 @@
   }
 
   function sanitizeStatus(status) {
-  const cleanStatus = String(status || "quiet").toLowerCase().trim();
+    const cleanStatus = String(status || "quiet").toLowerCase().trim();
 
-  if (["quiet", "moderate", "critical"].includes(cleanStatus)) {
-    return cleanStatus;
+    if (["quiet", "moderate", "critical"].includes(cleanStatus)) {
+      return cleanStatus;
+    }
+
+    if (["noisy", "loud", "very_loud", "too_loud"].includes(cleanStatus)) {
+      return "critical";
+    }
+
+    return "quiet";
   }
-
-  if (["noisy", "loud", "very_loud", "too_loud"].includes(cleanStatus)) {
-    return "critical";
-  }
-
-  return "quiet";
-}
 
   function normalizeTimestamp(value) {
     const number = Number(value);
@@ -1195,6 +1681,7 @@
     return String(url || "").trim().replace(/\/+$/, "");
   }
 
+  window.goHome = goHome;
   window.generateReport = generateReport;
   window.showNotifications = showNotifications;
   window.showAccount = showAccount;
@@ -1203,5 +1690,9 @@
   window.closeStudentsModal = closeStudentsModal;
   window.confirmDispatchIntervention = confirmDispatchIntervention;
   window.closeDispatchConfirmModal = closeDispatchConfirmModal;
+  window.showWarningResetModal = showWarningResetModal;
+  window.confirmWarningReset = confirmWarningReset;
+  window.closeWarningResetModal = closeWarningResetModal;
+  window.toggleNoiseView = toggleNoiseView;
   window.refreshData = refreshData;
 })();

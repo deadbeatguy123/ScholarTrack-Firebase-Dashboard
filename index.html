@@ -19,7 +19,7 @@
     rel="stylesheet"
   />
 
-  <link rel="stylesheet" href="styles.css?v=300" />
+  <link rel="stylesheet" href="styles.css?v=1400" />
 </head>
 
 <body>
@@ -29,12 +29,12 @@
       <div class="sidebar-glow sidebar-glow-bottom"></div>
 
       <div class="sidebar-header">
-        <div class="brand-row">
-          <div class="brand-mark">
+        <button class="brand-home" type="button" onclick="goHome()" aria-label="Go to Floor Overview">
+          <span class="brand-mark">
             <span class="material-symbols-outlined">school</span>
-          </div>
-          <h1 class="logo">ScholarTrack</h1>
-        </div>
+          </span>
+          <span class="logo">ScholarTrack</span>
+        </button>
 
         <div class="branch-card">
           <div class="branch-avatar">
@@ -96,54 +96,103 @@
       <span class="material-symbols-outlined">menu</span>
     </button>
 
-    <main class="main-content">
-      <header class="top-header">
-        <div class="header-left">
-          <h2>ScholarTrack Library</h2>
+    <main class="main-content" id="mainContent">
+      <header class="top-header" id="topHeader">
+        <div class="monitoring-header-card">
+          <div class="header-metric-card occupancy-metric" id="occupancyMetricCard">
+            <div class="header-metric-icon">
+              <span class="material-symbols-outlined">groups</span>
+            </div>
 
-          <div class="header-stats">
-            <div class="stat-card">
+            <div>
               <span class="stat-label">Occupancy</span>
               <span class="stat-value" id="occupancy">0 / 32</span>
             </div>
 
-            <div class="stat-card">
+            <div class="metric-popover occupancy-popover">
+              <div class="metric-popover-title">Occupancy Ratio</div>
+
+              <div class="occupancy-popover-body">
+                <div class="donut-chart" id="occupancyDonut">
+                  <div class="donut-center">
+                    <strong id="occupancyPercent">0%</strong>
+                    <span>used</span>
+                  </div>
+                </div>
+
+                <div class="occupancy-details">
+                  <div>
+                    <span>Occupied</span>
+                    <strong id="occupiedSeatsTooltip">0 seats</strong>
+                  </div>
+
+                  <div>
+                    <span>Available</span>
+                    <strong id="availableSeatsTooltip">32 seats</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="header-metric-card warning-metric" id="warningsMetricCard">
+            <div class="header-metric-icon warning-icon-card">
+              <span class="material-symbols-outlined">warning</span>
+            </div>
+
+            <div>
               <span class="stat-label">Warnings</span>
               <span class="stat-value warning" id="warnings">00 Active</span>
             </div>
-          </div>
-        </div>
 
-        <div class="header-right">
+            <div class="metric-popover warning-popover">
+              <div class="metric-popover-title">Active Warning Tables</div>
+              <div class="warning-table-list" id="warningTableList">
+                <div class="empty-warning-row">No active warnings.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="header-flex-spacer"></div>
+
+          <div class="live-monitoring-pill">
+            <span></span>
+            <strong>Live Monitoring</strong>
+          </div>
+
+          <div class="header-divider"></div>
+
           <div class="search-box">
-            <span class="material-symbols-outlined">search</span>
+            <span class="material-symbols-outlined search-icon">search</span>
             <input
               type="text"
               id="searchInput"
               placeholder="Search table or student..."
               autocomplete="off"
             />
+
+            <button
+              class="search-clear-btn"
+              id="searchClearBtn"
+              type="button"
+              aria-label="Clear search"
+              title="Clear search"
+            >
+              <span class="material-symbols-outlined">close</span>
+            </button>
           </div>
-
-          <button class="icon-btn" type="button" onclick="showNotifications()" aria-label="Notifications">
-            <span class="material-symbols-outlined">notifications</span>
-          </button>
-
-          <button class="icon-btn" type="button" onclick="showAccount()" aria-label="Account">
-            <span class="material-symbols-outlined">account_circle</span>
-          </button>
         </div>
       </header>
 
-      <section class="content-area">
+      <section class="content-area" id="contentArea">
         <section class="page" id="overviewPage">
-          <div class="page-header">
-            <div>
+          <div class="page-header overview-page-header" id="overviewPageHeader">
+            <div class="overview-title-copy">
               <h3>Floor Overview</h3>
               <p>Real-time table monitoring for Level 2 Study Area.</p>
             </div>
 
-            <div class="status-legend">
+            <div class="status-legend overview-status-legend">
               <div class="legend-item quiet">
                 <span class="status-dot"></span>
                 <span>Quiet</span>
@@ -161,9 +210,7 @@
             </div>
           </div>
 
-          <div class="tables-grid" id="tablesGrid">
-            <!-- Firebase table cards render here. -->
-          </div>
+          <div class="tables-grid" id="tablesGrid"></div>
         </section>
 
         <section class="page hidden" id="logsPage">
@@ -252,6 +299,6 @@
     </a>
   </nav>
 
-  <script src="script.js?v=300"></script>
+  <script src="script.js?v=1400"></script>
 </body>
 </html>
