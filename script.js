@@ -2,6 +2,7 @@
   "use strict";
 
   const FIREBASE_DB_URL = "https://micropit-91298-default-rtdb.asia-southeast1.firebasedatabase.app";
+  const THREE_STRIKE_IMAGE_SRC = "assets/three-strikes-noise.png";
 
   const TABLE_CONFIG = [
     { id: "A1", unitId: "unit_A" },
@@ -26,7 +27,15 @@
   let lastSuccessfulFetchAt = null;
   let scrollFrame = null;
 
+  let audioContext = null;
+  let audioUnlocked = false;
+
   const visibleNoiseTables = new Set();
+  const previousWarningCounts = new Map();
+  const threeStrikeAlertedTables = new Set();
+
+  let threeStrikeAlertQueue = [];
+  let threeStrikeModalOpen = false;
 
   let mainContent = null;
   let sidebar = null;
@@ -41,6 +50,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     initializeElements();
     setupEventListeners();
+    setupAudioUnlockListeners();
     renderEmptyDashboard();
     setHeaderMode("overview");
     refreshData();
@@ -124,6 +134,8 @@
     }
 
     document.addEventListener("click", function (event) {
+      playSoundForInteraction(event);
+
       if (
         window.innerWidth <= 768 &&
         sidebar &&
@@ -134,7 +146,7 @@
       ) {
         closeMobileMenu();
       }
-    });
+    }, true);
 
     window.addEventListener("resize", requestScrollMotionUpdate);
     window.addEventListener("online", refreshData);
@@ -153,6 +165,154 @@
     });
 
     window.addEventListener("beforeunload", stopAutoRefresh);
+  }
+
+  function setupAudioUnlockListeners() {
+    const unlock = function () {
+      unlockAudioContext();
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+      window.removeEventListener("touchstart", unlock);
+    };
+
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("keydown", unlock);
+    window.addEventListener("touchstart", unlock, { passive: true });
+  }
+
+  function unlockAudioContext() {
+    const context = getAudioContext();
+
+    if (!context) {
+      return;
+    }
+
+    if (context.state === "suspended") {
+      context.resume()
+        .then(function () {
+          audioUnlocked = true;
+        })
+        .catch(function () {
+          audioUnlocked = false;
+        });
+
+      return;
+    }
+
+    audioUnlocked = true;
+  }
+
+  function getAudioContext() {
+    if (audioContext) {
+      return audioContext;
+    }
+
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+
+    if (!AudioContextConstructor) {
+      return null;
+    }
+
+    audioContext = new AudioContextConstructor();
+    return audioContext;
+  }
+
+  function playSoundForInteraction(event) {
+    const interactiveElement = event.target.closest(
+      "button, .nav-item, .mobile-nav-item, .students-box, .status-toggle-button, .brand-home"
+    );
+
+    if (!interactiveElement) {
+      return;
+    }
+
+    if (
+      interactiveElement.classList.contains("dispatch-confirm-btn") ||
+      interactiveElement.classList.contains("dispatch-btn")
+    ) {
+      playUiSound("success");
+      return;
+    }
+
+    if (
+      interactiveElement.classList.contains("dispatch-cancel-btn") ||
+      interactiveElement.classList.contains("student-modal-close") ||
+      interactiveElement.classList.contains("noise-close-button") ||
+      interactiveElement.classList.contains("search-clear-btn") ||
+      interactiveElement.classList.contains("three-strike-close-btn")
+    ) {
+      playUiSound("soft");
+      return;
+    }
+
+    playUiSound("tap");
+  }
+
+  function playUiSound(type) {
+    const context = getAudioContext();
+
+    if (!context || !audioUnlocked || context.state !== "running") {
+      return;
+    }
+
+    if (type === "alert") {
+      playToneSequence([
+        { frequency: 740, start: 0.00, duration: 0.08, gain: 0.032 },
+        { frequency: 960, start: 0.10, duration: 0.10, gain: 0.036 },
+        { frequency: 1180, start: 0.23, duration: 0.16, gain: 0.030 }
+      ]);
+      return;
+    }
+
+    if (type === "success") {
+      playToneSequence([
+        { frequency: 520, start: 0.00, duration: 0.05, gain: 0.020 },
+        { frequency: 780, start: 0.06, duration: 0.08, gain: 0.024 }
+      ]);
+      return;
+    }
+
+    if (type === "soft") {
+      playToneSequence([
+        { frequency: 420, start: 0.00, duration: 0.045, gain: 0.014 }
+      ]);
+      return;
+    }
+
+    playToneSequence([
+      { frequency: 620, start: 0.00, duration: 0.035, gain: 0.014 }
+    ]);
+  }
+
+  function playToneSequence(notes) {
+    notes.forEach(function (note) {
+      playTone(note.frequency, note.start, note.duration, note.gain);
+    });
+  }
+
+  function playTone(frequency, startOffset, duration, maxGain) {
+    const context = getAudioContext();
+
+    if (!context || context.state !== "running") {
+      return;
+    }
+
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    const gainNode = context.createGain();
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, now + startOffset);
+
+    gainNode.gain.setValueAtTime(0.0001, now + startOffset);
+    gainNode.gain.exponentialRampToValueAtTime(maxGain, now + startOffset + 0.012);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+
+    oscillator.connect(gainNode);
+    gainNode.connect(context.destination);
+
+    oscillator.start(now + startOffset);
+    oscillator.stop(now + startOffset + duration + 0.03);
   }
 
   function requestScrollMotionUpdate() {
@@ -251,6 +411,7 @@
       lastSuccessfulFetchAt = Date.now();
 
       pruneNoiseViewState();
+      handleThreeStrikeTransitions(dashboardData.tables);
       renderTables(searchInput ? searchInput.value : "");
       renderLogs();
       updateStats();
@@ -262,6 +423,128 @@
       console.error("Firebase fetch error:", error);
       updateConnectionStatus(false, "Firebase read failed");
     }
+  }
+
+  function handleThreeStrikeTransitions(tables) {
+    tables.forEach(function (table) {
+      const previousCount = previousWarningCounts.get(table.id);
+      const currentCount = table.warnings;
+
+      if (currentCount < DEFAULT_MAX_WARNINGS) {
+        threeStrikeAlertedTables.delete(table.id);
+      }
+
+      const reachedThreeStrikes = currentCount >= DEFAULT_MAX_WARNINGS;
+      const crossedIntoThreeStrikes =
+        previousCount === undefined || previousCount < DEFAULT_MAX_WARNINGS;
+
+      if (
+        reachedThreeStrikes &&
+        crossedIntoThreeStrikes &&
+        !threeStrikeAlertedTables.has(table.id)
+      ) {
+        threeStrikeAlertedTables.add(table.id);
+        enqueueThreeStrikeAlert(table);
+      }
+
+      previousWarningCounts.set(table.id, currentCount);
+    });
+  }
+
+  function enqueueThreeStrikeAlert(table) {
+    threeStrikeAlertQueue.push({
+      id: table.id,
+      unitId: table.unitId,
+      warnings: table.warnings,
+      maxWarnings: table.maxWarnings,
+      studentCount: table.studentCount,
+      noiseLevel: table.noiseLevel
+    });
+
+    showNextThreeStrikeAlert();
+  }
+
+  function showNextThreeStrikeAlert() {
+    if (threeStrikeModalOpen || threeStrikeAlertQueue.length === 0) {
+      return;
+    }
+
+    const alertData = threeStrikeAlertQueue.shift();
+    showThreeStrikeAlertModal(alertData);
+  }
+
+  function showThreeStrikeAlertModal(alertData) {
+    const overlay = ensureThreeStrikeAlertModal();
+
+    threeStrikeModalOpen = true;
+
+    overlay.innerHTML = `
+      <div class="three-strike-modal-card" role="dialog" aria-modal="true">
+        <div class="three-strike-visual">
+          <img
+            src="${escapeHtml(THREE_STRIKE_IMAGE_SRC)}"
+            alt="Noisy students illustration"
+            onerror="this.closest('.three-strike-visual').classList.add('image-missing'); this.remove();"
+          />
+          <div class="three-strike-visual-overlay"></div>
+          <div class="three-strike-floating-badge">
+            <span class="material-symbols-outlined">campaign</span>
+            <strong>Three Strikes</strong>
+          </div>
+        </div>
+
+        <div class="three-strike-content">
+          <h3>Table ${escapeHtml(alertData.id)} just reached three strikes.</h3>
+          <p>This table may need attention because it reached the maximum warning count.</p>
+
+          <div class="three-strike-actions">
+            <button type="button" class="three-strike-close-btn" onclick="closeThreeStrikeAlertModal()">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+    playUiSound("alert");
+  }
+
+  function ensureThreeStrikeAlertModal() {
+    let overlay = document.getElementById("threeStrikeAlertOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "threeStrikeAlertOverlay";
+    overlay.className = "modal-overlay three-strike-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeThreeStrikeAlertModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function closeThreeStrikeAlertModal() {
+    const overlay = document.getElementById("threeStrikeAlertOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    threeStrikeModalOpen = false;
+    document.body.classList.remove("modal-open");
+    playUiSound("soft");
+
+    window.setTimeout(showNextThreeStrikeAlert, 120);
   }
 
   function pruneNoiseViewState() {
@@ -1432,6 +1715,12 @@
       delete firebaseDevices[table.unitId].audio.warnings;
     }
 
+    if (count < DEFAULT_MAX_WARNINGS) {
+      threeStrikeAlertedTables.delete(table.id);
+    }
+
+    previousWarningCounts.set(table.id, count);
+
     dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
 
     renderTables(searchInput ? searchInput.value : "");
@@ -1695,4 +1984,5 @@
   window.closeWarningResetModal = closeWarningResetModal;
   window.toggleNoiseView = toggleNoiseView;
   window.refreshData = refreshData;
+  window.closeThreeStrikeAlertModal = closeThreeStrikeAlertModal;
 })();

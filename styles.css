@@ -1463,8 +1463,6 @@ a {
   font-weight: 850;
 }
 
-/* Noise visual mode */
-
 .noise-view-body {
   padding: 16px;
 }
@@ -1709,7 +1707,8 @@ a {
 }
 
 .student-modal-card,
-.dispatch-modal-card {
+.dispatch-modal-card,
+.three-strike-modal-card {
   width: min(620px, 100%);
   max-height: min(680px, 86vh);
   overflow: hidden;
@@ -1914,7 +1913,8 @@ a {
 }
 
 .dispatch-cancel-btn,
-.dispatch-confirm-btn {
+.dispatch-confirm-btn,
+.three-strike-close-btn {
   min-height: 44px;
   border-radius: 12px;
   font-size: 14px;
@@ -1949,6 +1949,182 @@ a {
   box-shadow: 0 12px 22px rgba(220, 38, 38, 0.20);
 }
 
+/* Three-strikes popup */
+
+.three-strike-overlay {
+  background:
+    radial-gradient(circle at 50% 20%, rgba(248, 113, 113, 0.28), transparent 30%),
+    rgba(15, 23, 42, 0.56);
+}
+
+.three-strike-modal-card {
+  width: min(560px, 100%);
+  max-height: min(700px, 88vh);
+  animation: threeStrikeModalPop 0.22s ease both;
+}
+
+@keyframes threeStrikeModalPop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.three-strike-visual {
+  height: 210px;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 24% 18%, rgba(254, 226, 226, 0.78), transparent 34%),
+    linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.three-strike-visual img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.42;
+  filter: grayscale(1) contrast(1.08);
+  transform: scale(1.02);
+}
+
+.three-strike-visual.image-missing {
+  background:
+    radial-gradient(circle at 50% 20%, rgba(254, 202, 202, 0.72), transparent 28%),
+    linear-gradient(135deg, #fff7f7 0%, #ffffff 100%);
+}
+
+.three-strike-visual.image-missing::before {
+  content: "!";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 94px;
+  height: 94px;
+  border-radius: 50%;
+  background: #fee2e2;
+  color: #dc2626;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 56px;
+  font-weight: 950;
+  transform: translate(-50%, -50%);
+}
+
+.three-strike-visual-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.88) 100%),
+    radial-gradient(circle at 75% 20%, rgba(239, 68, 68, 0.12), transparent 30%);
+}
+
+.three-strike-floating-badge {
+  position: absolute;
+  left: 22px;
+  bottom: 18px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(254, 202, 202, 0.96);
+  color: #b91c1c;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(12px);
+}
+
+.three-strike-floating-badge .material-symbols-outlined {
+  font-size: 22px;
+}
+
+.three-strike-floating-badge strong {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.three-strike-content {
+  padding: 24px;
+  text-align: center;
+}
+
+.three-strike-content h3 {
+  margin: 0;
+  color: #071426;
+  font-size: 25px;
+  line-height: 1.16;
+  font-weight: 950;
+  letter-spacing: -0.05em;
+}
+
+.three-strike-content p {
+  max-width: 420px;
+  margin: 10px auto 18px;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.55;
+  font-weight: 650;
+}
+
+.three-strike-summary {
+  margin: 0 0 20px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.three-strike-summary div {
+  padding: 11px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.three-strike-summary div:last-child {
+  border-bottom: 0;
+}
+
+.three-strike-summary span {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.three-strike-summary strong {
+  color: #071426;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.three-strike-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.three-strike-close-btn {
+  border: 0;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: #ffffff;
+  box-shadow: 0 14px 24px rgba(220, 38, 38, 0.20);
+}
+
+.three-strike-close-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.02);
+  box-shadow: 0 16px 30px rgba(220, 38, 38, 0.26);
+}
+
 .mobile-menu-toggle {
   display: none;
 }
@@ -1981,7 +2157,8 @@ button,
 .warning-reset-button,
 .brand-home,
 .status-toggle-button,
-.noise-close-button {
+.noise-close-button,
+.three-strike-close-btn {
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -1994,7 +2171,8 @@ button:focus-visible,
 .warning-reset-button:focus-visible,
 .brand-home:focus-visible,
 .status-toggle-button:focus-visible,
-.noise-close-button:focus-visible {
+.noise-close-button:focus-visible,
+.three-strike-close-btn:focus-visible {
   outline: 3px solid rgba(37, 99, 235, 0.22);
   outline-offset: 3px;
 }
@@ -2123,6 +2301,14 @@ button:focus-visible,
     display: none;
   }
 
+  .three-strike-visual {
+    height: 170px;
+  }
+
+  .three-strike-content h3 {
+    font-size: 22px;
+  }
+
   .mobile-nav {
     height: 66px;
     background: #ffffff;
@@ -2174,4 +2360,59 @@ button:focus-visible,
     scroll-behavior: auto !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* Smooth modal animations */
+.modal-overlay:not(.hidden) {
+  animation: modalOverlayFadeIn 0.22s ease both;
+}
+
+@keyframes modalOverlayFadeIn {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+
+  to {
+    opacity: 1;
+    backdrop-filter: blur(7px);
+  }
+}
+
+.student-modal-card,
+.dispatch-modal-card,
+.three-strike-modal-card {
+  transform-origin: center;
+  animation: modalCardEnter 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes modalCardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.965);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Cleaner three-strikes popup without summary table */
+.three-strike-content {
+  padding: 26px 28px 28px;
+}
+
+.three-strike-content h3 {
+  max-width: 430px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.three-strike-content p {
+  margin-bottom: 22px;
+}
+
+.three-strike-actions {
+  margin-top: 4px;
 }
