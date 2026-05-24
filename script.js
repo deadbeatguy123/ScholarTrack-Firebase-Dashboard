@@ -148,6 +148,7 @@
       }
 
       const data = await response.json();
+
       firebaseDevices = isPlainObject(data) ? data : {};
       dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
       lastSuccessfulFetchAt = Date.now();
@@ -164,72 +165,74 @@
   }
 
   function mapFirebaseDevicesToDashboard(devices) {
-    const tables = TABLE_CONFIG.map(function (tableConfig) {
-      const device = isPlainObject(devices[tableConfig.unitId])
-        ? devices[tableConfig.unitId]
-        : {};
+  const tables = TABLE_CONFIG.map(function (tableConfig) {
+    const device = isPlainObject(devices[tableConfig.unitId])
+      ? devices[tableConfig.unitId]
+      : {};
 
-      const audio = isPlainObject(device.audio) ? device.audio : {};
-      const students = getCurrentStudentsFromDevice(device);
-      const studentCount = students.length;
-      const available = studentCount === 0;
+    const audio = isPlainObject(device.audio) ? device.audio : {};
+    const students = getCurrentStudentsFromDevice(device);
+    const studentCount = students.length;
+    const available = studentCount === 0;
 
-      let warnings = 0;
-      let status = "quiet";
+    let warnings = 0;
+    let status = "quiet";
 
-      /*
-        Strict rule:
-        QR entries mean the table is occupied.
-        Audio alone does not make a table occupied.
-      */
-      if (!available) {
-        warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
+    /*
+      Same rule for every table:
+      - QR/current_students entries make the table occupied.
+      - Audio alone does not make the table occupied.
+      - If occupied, audio determines Quiet/Moderate/Critical.
+      - warning_count determines when Dispatch Intervention appears.
+    */
+    if (!available) {
+      warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
 
-        if (warnings >= DEFAULT_MAX_WARNINGS) {
-          status = "critical";
-        } else {
-          status = getStatusFromAudio(audio);
-        }
+      if (warnings >= DEFAULT_MAX_WARNINGS) {
+        status = "critical";
+      } else {
+        status = getStatusFromAudio(audio);
       }
-
-      return {
-        id: tableConfig.id,
-        unitId: tableConfig.unitId,
-        status,
-        warnings,
-        maxWarnings: DEFAULT_MAX_WARNINGS,
-        studentCount,
-        students,
-        available,
-        noiseLevel: toNumber(audio.received_db, 0),
-        updatedAt: audio.updated_at || device.updated_at || null
-      };
-    });
-
-    const currentOccupancy = tables.reduce(function (sum, table) {
-      return sum + table.studentCount;
-    }, 0);
-
-    const activeWarnings = tables.reduce(function (sum, table) {
-      return sum + table.warnings;
-    }, 0);
-
-    const highestNoise = tables.reduce(function (max, table) {
-      return Math.max(max, table.noiseLevel || 0);
-    }, 0);
+    }
 
     return {
-      tables,
-      occupancy: {
-        current: currentOccupancy,
-        max: tables.length * SEATS_PER_TABLE
-      },
-      warnings: activeWarnings,
-      sensors: {
-        noiseLevel: highestNoise
-      }
+      id: tableConfig.id,
+      unitId: tableConfig.unitId,
+      status,
+      warnings,
+      maxWarnings: DEFAULT_MAX_WARNINGS,
+      studentCount,
+      students,
+      available,
+      noiseLevel: toNumber(audio.received_db, 0),
+      updatedAt: audio.updated_at || device.updated_at || null
     };
-  }
+  });
+
+  const currentOccupancy = tables.reduce(function (sum, table) {
+    return sum + table.studentCount;
+  }, 0);
+
+  const activeWarnings = tables.reduce(function (sum, table) {
+    return sum + table.warnings;
+  }, 0);
+
+  const highestNoise = tables.reduce(function (max, table) {
+    return Math.max(max, table.noiseLevel || 0);
+  }, 0);
+
+  return {
+    tables,
+    occupancy: {
+      current: currentOccupancy,
+      max: tables.length * SEATS_PER_TABLE
+    },
+    warnings: activeWarnings,
+    sensors: {
+      noiseLevel: highestNoise
+    }
+  };
+}
 
   function getCurrentStudentsFromDevice(device) {
     const source = device.current_students || device.qr_codes || {};
@@ -304,10 +307,6 @@
   function getWarningCount(device, maxWarnings) {
     const audio = isPlainObject(device.audio) ? device.audio : {};
 
-    /*
-      ESP32 audio.level is only the current sound state.
-      It is NOT the accumulated warning count.
-    */
     const rawWarnings =
       device.warning_count ??
       device.warningCount ??
@@ -321,26 +320,58 @@
   }
 
   function getStatusFromAudio(audio) {
-    const manualStatus = String(audio.status || "").toLowerCase();
+  /*
+    ESP32 audio.level meaning:
+    0 = quiet
+    1 = noisy/moderate level
+    2 = loud/critical level
 
-    if (["quiet", "moderate", "noisy"].includes(manualStatus)) {
-      return manualStatus;
+    This is NOT the warning count.
+    It is only the current sound state.
+  */
+
+  const manualStatus = String(audio.status || "").toLowerCase().trim();
+
+  if (["quiet", "normal", "silent"].includes(manualStatus)) {
+    return "quiet";
+  }
+
+  if (["moderate", "noisy", "noise"].includes(manualStatus)) {
+    return "moderate";
+  }
+
+  if (["critical", "loud", "very_loud", "too_loud"].includes(manualStatus)) {
+    return "critical";
+  }
+
+  const level = Number(audio.level);
+
+  if (Number.isFinite(level)) {
+    if (level >= 2) {
+      return "critical";
     }
 
-    const receivedDb = toNumber(audio.received_db, 0);
-    const noisyThreshold = toNumber(audio.noisy_threshold, 83);
-    const loudThreshold = toNumber(audio.loud_threshold, 90);
-
-    if (receivedDb >= loudThreshold) {
-      return "noisy";
-    }
-
-    if (receivedDb >= noisyThreshold) {
+    if (level >= 1) {
       return "moderate";
     }
 
     return "quiet";
   }
+
+  const receivedDb = toNumber(audio.received_db, 0);
+  const noisyThreshold = toNumber(audio.noisy_threshold, 83);
+  const loudThreshold = toNumber(audio.loud_threshold, 90);
+
+  if (receivedDb >= loudThreshold) {
+    return "critical";
+  }
+
+  if (receivedDb >= noisyThreshold) {
+    return "moderate";
+  }
+
+  return "quiet";
+}
 
   function renderTables(searchTerm = "") {
     if (!tablesGrid) {
@@ -375,118 +406,111 @@
   }
 
   function createTableCard(table) {
-    if (table.available) {
-      return createAvailableTableCard(table);
-    }
-
-    const isCritical = table.status === "critical" || table.warnings >= table.maxWarnings;
-    const statusClass = sanitizeStatus(isCritical ? "critical" : table.status);
-    const statusLabel = isCritical ? "Critical" : capitalize(statusClass);
-
-    const firstStudent = table.students[0] || null;
-    const studentSubtext = firstStudent
-      ? getStudentSubtext(firstStudent, table.studentCount)
-      : "QR registered";
-
-    return `
-      <article class="table-card smart-table-card ${isCritical ? "critical" : ""}">
-        <div class="smart-card-header">
-          <div class="smart-seat-icon">
-            <span class="material-symbols-outlined">event_seat</span>
-          </div>
-
-          <h4 class="smart-table-title">Table ${escapeHtml(table.id)}</h4>
-
-          <div class="smart-status-pill ${statusClass}">
-            <span class="smart-status-dot"></span>
-            <span>${escapeHtml(statusLabel)}</span>
-          </div>
-        </div>
-
-        <div class="smart-card-content">
-          <section class="smart-warning-box ${isCritical ? "critical" : ""}">
-            <div class="smart-warning-row">
-              <div class="smart-warning-icon">
-                <span class="material-symbols-outlined">warning</span>
-              </div>
-
-              <div class="smart-warning-title">Warnings</div>
-
-              <div class="smart-warning-bars">
-                ${generateWarningBars(table.warnings, table.maxWarnings)}
-              </div>
-
-              <div class="smart-warning-count">${table.warnings} / ${table.maxWarnings}</div>
-            </div>
-
-            ${
-              isCritical
-                ? `
-                  <button
-                    class="smart-dispatch-btn"
-                    type="button"
-                    onclick="dispatchIntervention('${escapeJsString(table.id)}')"
-                  >
-                    <span class="material-symbols-outlined">send</span>
-                    <span>Dispatch Intervention</span>
-                  </button>
-                `
-                : ""
-            }
-          </section>
-
-          <button
-            class="smart-students-box"
-            type="button"
-            onclick="showSeatedStudentsModal('${escapeJsString(table.id)}')"
-            aria-label="View seated students for Table ${escapeHtml(table.id)}"
-          >
-            <div class="smart-students-label">
-              <span class="smart-students-icon">
-                <span class="material-symbols-outlined">groups</span>
-              </span>
-              <span>Seated Students</span>
-            </div>
-
-            <div class="smart-students-main">
-              <div class="smart-avatar">
-                ${escapeHtml(firstStudent ? firstStudent.initials : "ST")}
-              </div>
-
-              <div class="smart-student-text">
-                <p>${table.studentCount} student${table.studentCount !== 1 ? "s" : ""}</p>
-                <span>${escapeHtml(studentSubtext)}</span>
-              </div>
-
-              <div class="smart-mini-chart" aria-hidden="true">
-                <i></i>
-                <i></i>
-                <i></i>
-              </div>
-            </div>
-          </button>
-        </div>
-      </article>
-    `;
+  if (table.available) {
+    return createAvailableTableCard(table);
   }
+
+  const isDispatchReady = table.warnings >= table.maxWarnings;
+  const statusClass = sanitizeStatus(isDispatchReady ? "critical" : table.status);
+  const statusLabel = capitalize(statusClass);
+  const firstStudent = table.students[0] || null;
+
+  return `
+    <article class="table-card occupied-card ${isDispatchReady ? "critical" : ""}">
+      <div class="table-card-header">
+        <div class="seat-icon">
+          <span class="material-symbols-outlined">event_seat</span>
+        </div>
+
+        <h4>Table ${escapeHtml(table.id)}</h4>
+
+        <div class="table-status-pill ${statusClass}">
+          <span></span>
+          <strong>${escapeHtml(statusLabel)}</strong>
+        </div>
+      </div>
+
+      <div class="table-card-body">
+        <section class="warning-box ${isDispatchReady ? "critical" : ""}">
+          <div class="warning-row no-warning-counter">
+            <div class="warning-icon">
+              <span class="material-symbols-outlined">warning</span>
+            </div>
+
+            <div class="warning-label">Warnings</div>
+
+            <div class="warning-bars">
+              ${generateWarningBars(table.warnings, table.maxWarnings)}
+            </div>
+          </div>
+
+          ${
+            isDispatchReady
+              ? `
+                <button
+                  class="dispatch-btn"
+                  type="button"
+                  onclick="dispatchIntervention('${escapeJsString(table.id)}')"
+                >
+                  <span class="material-symbols-outlined">send</span>
+                  <span>Dispatch Intervention</span>
+                </button>
+              `
+              : ""
+          }
+        </section>
+
+        <button
+          class="students-box"
+          type="button"
+          onclick="showSeatedStudentsModal('${escapeJsString(table.id)}')"
+          aria-label="View seated students for Table ${escapeHtml(table.id)}"
+        >
+          <div class="students-label">
+            <span class="students-label-icon">
+              <span class="material-symbols-outlined">groups</span>
+            </span>
+            <span>Seated Students</span>
+          </div>
+
+          <div class="students-main">
+            <div class="student-avatar">
+              ${escapeHtml(firstStudent ? firstStudent.initials : "ST")}
+            </div>
+
+            <div class="student-text">
+              <p>${table.studentCount} student${table.studentCount !== 1 ? "s" : ""}</p>
+            </div>
+
+            <div class="student-chart" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </div>
+          </div>
+        </button>
+      </div>
+    </article>
+  `;
+}
 
   function createAvailableTableCard(table) {
     return `
-      <article class="table-card smart-table-card smart-available-card available">
-        <div class="smart-card-header">
-          <div class="smart-seat-icon muted">
+      <article class="table-card available-card available">
+        <div class="table-card-header">
+          <div class="seat-icon muted">
             <span class="material-symbols-outlined">event_seat</span>
           </div>
 
-          <h4 class="smart-table-title">Table ${escapeHtml(table.id)}</h4>
+          <h4>Table ${escapeHtml(table.id)}</h4>
 
-          <div class="smart-status-pill quiet">
-            <span class="smart-status-dot"></span>
-            <span>Quiet</span>
+          <div class="table-status-pill quiet">
+            <span></span>
+            <strong>Quiet</strong>
           </div>
         </div>
 
-        <div class="smart-available-body">
+        <div class="available-body">
           <span class="material-symbols-outlined">event_seat</span>
           <p>Available</p>
         </div>
@@ -498,7 +522,7 @@
     let bars = "";
 
     for (let i = 0; i < maxWarnings; i += 1) {
-      bars += `<span class="warning-bar-segment ${i < warnings ? "active" : ""}"></span>`;
+      bars += `<span class="warning-segment ${i < warnings ? "active" : ""}"></span>`;
     }
 
     return bars;
@@ -670,23 +694,14 @@
     });
 
     const csv = rows.map(function (row) {
-      return row.map(function (cell) {
-        return `"${String(cell).replaceAll('"', '""')}"`;
-      }).join(",");
-    }).join("\n");
+      return row.map(escapeCsvCell).join(",");
+    }).join("\r\n");
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `scholartrack-report-${new Date().toISOString().slice(0, 10)}.csv`;
-
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    URL.revokeObjectURL(url);
+    downloadBlob(
+      "\ufeff" + csv,
+      `scholartrack-report-${new Date().toISOString().slice(0, 10)}.csv`,
+      "text/csv;charset=utf-8"
+    );
   }
 
   function showNotifications() {
@@ -791,7 +806,7 @@
 
     overlay = document.createElement("div");
     overlay.id = "studentModalOverlay";
-    overlay.className = "student-modal-overlay hidden";
+    overlay.className = "modal-overlay hidden";
 
     overlay.addEventListener("click", function (event) {
       if (event.target === overlay) {
@@ -800,7 +815,6 @@
     });
 
     document.body.appendChild(overlay);
-
     return overlay;
   }
 
@@ -840,7 +854,8 @@
         <h3>Dispatch intervention?</h3>
 
         <p>
-         This will mark Table ${escapeHtml(table.id)} as handled and reset its warning count.
+          This will generate a CSV report for Table ${escapeHtml(table.id)}
+          and reset its warning count.
         </p>
 
         <div class="dispatch-modal-summary">
@@ -885,7 +900,7 @@
 
     overlay = document.createElement("div");
     overlay.id = "dispatchConfirmOverlay";
-    overlay.className = "dispatch-modal-overlay hidden";
+    overlay.className = "modal-overlay hidden";
 
     overlay.addEventListener("click", function (event) {
       if (event.target === overlay) {
@@ -894,7 +909,6 @@
     });
 
     document.body.appendChild(overlay);
-
     return overlay;
   }
 
@@ -920,6 +934,7 @@
     }
 
     try {
+      downloadDispatchCsv(table);
       await resetWarningCountForTable(table);
 
       if (!isPlainObject(firebaseDevices[table.unitId])) {
@@ -945,9 +960,51 @@
 
       closeDispatchConfirmModal();
     } catch (error) {
-      console.error("Failed to reset warning count:", error);
-      alert("Dispatch failed. Warning count was not reset. Check Firebase write rules.");
+      console.error("Failed to complete dispatch:", error);
+      alert("Dispatch failed. The CSV file may have downloaded, but the warning count was not reset. Check Firebase write rules.");
     }
+  }
+
+  function downloadDispatchCsv(table) {
+    const generatedAt = new Date();
+    const safeTableId = String(table.id).replace(/[^a-z0-9_-]/gi, "_");
+    const filename = `dispatch-intervention-table-${safeTableId}-${generatedAt.toISOString().slice(0, 10)}.csv`;
+
+    const rows = [
+      ["ScholarTrack Dispatch Intervention Report"],
+      [],
+      ["Table", table.id],
+      ["Generated At", formatDateTime(generatedAt.getTime())],
+      ["Warnings Before Dispatch", `${table.warnings} / ${table.maxWarnings}`],
+      ["Total Seated Students", String(table.studentCount)],
+      [],
+      ["#", "Student Name", "ID Number", "Program", "Scanned At", "Raw QR Payload"]
+    ];
+
+    if (table.students.length > 0) {
+      table.students.forEach(function (student, index) {
+        rows.push([
+          String(index + 1),
+          student.name || "Registered Student",
+          student.studentId || "No ID found",
+          student.program || "Program not provided",
+          student.scannedAt ? formatDateTime(normalizeTimestamp(student.scannedAt)) : "",
+          student.payload || ""
+        ]);
+      });
+    } else {
+      rows.push(["", "No students were seated at this table during dispatch.", "", "", "", ""]);
+    }
+
+    const csv = rows.map(function (row) {
+      return row.map(escapeCsvCell).join(",");
+    }).join("\r\n");
+
+    downloadBlob(
+      "\ufeff" + csv,
+      filename,
+      "text/csv;charset=utf-8"
+    );
   }
 
   async function resetWarningCountForTable(table) {
@@ -998,22 +1055,24 @@
     }
   }
 
-  function getStudentSubtext(student, studentCount) {
-    const parts = [];
+  function downloadBlob(content, filename, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
 
-    if (student.studentId) {
-      parts.push(`ID: ${student.studentId}`);
-    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
 
-    if (student.program) {
-      parts.push(student.program);
-    }
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 
-    if (studentCount > 1) {
-      parts.push(`${studentCount} QR entries`);
-    }
+    URL.revokeObjectURL(url);
+  }
 
-    return parts.length > 0 ? parts.join(" · ") : "QR registered";
+  function escapeCsvCell(value) {
+    const text = String(value ?? "");
+    return `"${text.replaceAll('"', '""')}"`;
   }
 
   function getInitials(name) {
@@ -1069,14 +1128,18 @@
   }
 
   function sanitizeStatus(status) {
-    const cleanStatus = String(status || "quiet").toLowerCase();
+  const cleanStatus = String(status || "quiet").toLowerCase().trim();
 
-    if (["quiet", "moderate", "noisy", "critical"].includes(cleanStatus)) {
-      return cleanStatus;
-    }
-
-    return "quiet";
+  if (["quiet", "moderate", "critical"].includes(cleanStatus)) {
+    return cleanStatus;
   }
+
+  if (["noisy", "loud", "very_loud", "too_loud"].includes(cleanStatus)) {
+    return "critical";
+  }
+
+  return "quiet";
+}
 
   function normalizeTimestamp(value) {
     const number = Number(value);
