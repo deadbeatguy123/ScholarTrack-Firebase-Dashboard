@@ -3,6 +3,9 @@
 
   const FIREBASE_DB_URL = "https://micropit-91298-default-rtdb.asia-southeast1.firebasedatabase.app";
   const THREE_STRIKE_IMAGE_SRC = "assets/three-strikes-noise.png";
+  const NO_WARNINGS_IMAGE_SRC = "assets/no-warnings-sign.png";
+  const DISPATCH_SIREN_IMAGE_SRC = "assets/dispatch-siren.png";
+  const DISPATCH_POLICE_IMAGE_SRC = "assets/dispatch-police.png";
 
   const TABLE_CONFIG = [
     { id: "A1", unitId: "unit_A" },
@@ -1449,43 +1452,52 @@
     const overlay = ensureDispatchConfirmModal();
 
     overlay.innerHTML = `
-      <div class="dispatch-modal-card" role="dialog" aria-modal="true">
-        <div class="dispatch-modal-icon">
-          <span class="material-symbols-outlined">warning</span>
-        </div>
+      <div class="dispatch-modal-card visual-modal-card dispatch-visual-card" role="dialog" aria-modal="true">
+        <div class="visual-modal-hero dispatch-hero">
+          <img
+            class="dispatch-police-img"
+            src="${escapeHtml(DISPATCH_POLICE_IMAGE_SRC)}"
+            alt="Intervention illustration"
+            onerror="this.closest('.dispatch-hero').classList.add('police-missing'); this.remove();"
+          />
 
-        <h3>Dispatch intervention?</h3>
+          <img
+            class="dispatch-siren-img"
+            src="${escapeHtml(DISPATCH_SIREN_IMAGE_SRC)}"
+            alt="Siren illustration"
+            onerror="this.classList.add('hidden');"
+          />
 
-        <p>
-          This will generate a CSV report for Table ${escapeHtml(table.id)}
-          and reset its warning count.
-        </p>
+          <div class="visual-modal-overlay"></div>
 
-        <div class="dispatch-modal-summary">
-          <div>
-            <span>Table</span>
-            <strong>${escapeHtml(table.id)}</strong>
-          </div>
-
-          <div>
-            <span>Current warnings</span>
-            <strong>${table.warnings} / ${table.maxWarnings}</strong>
-          </div>
-
-          <div>
-            <span>Seated students</span>
-            <strong>${table.studentCount}</strong>
+          <div class="visual-modal-badge dispatch-badge">
+            <span class="material-symbols-outlined">local_police</span>
+            <strong>Intervention</strong>
           </div>
         </div>
 
-        <div class="dispatch-modal-actions">
-          <button type="button" class="dispatch-cancel-btn" onclick="closeDispatchConfirmModal()">
-            Cancel
-          </button>
+        <div class="visual-modal-content">
+          <h3>Dispatch intervention?</h3>
 
-          <button type="button" class="dispatch-confirm-btn" onclick="confirmDispatchIntervention('${escapeJsString(table.id)}')">
-            Confirm Dispatch
-          </button>
+          <p>
+            This will generate a CSV report for Table ${escapeHtml(table.id)}
+            and reset its warning count.
+          </p>
+
+          <div class="visual-modal-mini-info danger">
+            <span class="material-symbols-outlined">warning</span>
+            <strong>Table ${escapeHtml(table.id)} has ${table.warnings} / ${table.maxWarnings} warnings.</strong>
+          </div>
+
+          <div class="dispatch-modal-actions">
+            <button type="button" class="dispatch-cancel-btn" onclick="closeDispatchConfirmModal()">
+              Cancel
+            </button>
+
+            <button type="button" class="dispatch-confirm-btn" onclick="confirmDispatchIntervention('${escapeJsString(table.id)}')">
+              Confirm Dispatch
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -1563,38 +1575,34 @@
 
     if (table.warnings <= 0) {
       overlay.innerHTML = `
-        <div class="dispatch-modal-card no-warning-modal-card" role="dialog" aria-modal="true">
-          <div class="dispatch-modal-icon reset-modal-icon">
-            <span class="material-symbols-outlined">check_circle</span>
-          </div>
+        <div class="dispatch-modal-card visual-modal-card no-warning-visual-card" role="dialog" aria-modal="true">
+          <div class="visual-modal-hero no-warning-hero">
+            <img
+              src="${escapeHtml(NO_WARNINGS_IMAGE_SRC)}"
+              alt="No warnings illustration"
+              onerror="this.closest('.no-warning-hero').classList.add('image-missing'); this.remove();"
+            />
 
-          <h3>No warnings recorded</h3>
+            <div class="visual-modal-overlay no-warning-overlay"></div>
 
-          <p>
-            Table ${escapeHtml(table.id)} currently has no active warnings to reset.
-          </p>
-
-          <div class="dispatch-modal-summary">
-            <div>
-              <span>Table</span>
-              <strong>${escapeHtml(table.id)}</strong>
-            </div>
-
-            <div>
-              <span>Current warnings</span>
-              <strong>${table.warnings} / ${table.maxWarnings}</strong>
-            </div>
-
-            <div>
-              <span>Seated students</span>
-              <strong>${table.studentCount}</strong>
+            <div class="visual-modal-badge no-warning-badge">
+              <span class="material-symbols-outlined">check_circle</span>
+              <strong>Clear</strong>
             </div>
           </div>
 
-          <div class="dispatch-modal-actions single-action">
-            <button type="button" class="dispatch-cancel-btn modal-wide-btn" onclick="closeWarningResetModal()">
-              Close
-            </button>
+          <div class="visual-modal-content">
+            <h3>No warnings recorded</h3>
+
+            <p>
+              Table ${escapeHtml(table.id)} currently has no active warnings to reset.
+            </p>
+
+            <div class="dispatch-modal-actions single-action">
+              <button type="button" class="dispatch-cancel-btn modal-wide-btn" onclick="closeWarningResetModal()">
+                Close
+              </button>
+            </div>
           </div>
         </div>
       `;
@@ -1605,42 +1613,32 @@
     }
 
     overlay.innerHTML = `
-      <div class="dispatch-modal-card" role="dialog" aria-modal="true">
-        <div class="dispatch-modal-icon reset-modal-icon">
+      <div class="dispatch-modal-card visual-modal-card reset-visual-card" role="dialog" aria-modal="true">
+        <div class="reset-visual-icon">
           <span class="material-symbols-outlined">restart_alt</span>
         </div>
 
-        <h3>Reset warnings?</h3>
+        <div class="visual-modal-content reset-visual-content">
+          <h3>Reset warnings?</h3>
 
-        <p>
-          Are you sure you want to reset this table's warning count?
-        </p>
+          <p>
+            Are you sure you want to reset Table ${escapeHtml(table.id)}'s warning count?
+          </p>
 
-        <div class="dispatch-modal-summary">
-          <div>
-            <span>Table</span>
-            <strong>${escapeHtml(table.id)}</strong>
+          <div class="visual-modal-mini-info">
+            <span class="material-symbols-outlined">warning</span>
+            <strong>Current warnings: ${table.warnings} / ${table.maxWarnings}</strong>
           </div>
 
-          <div>
-            <span>Current warnings</span>
-            <strong>${table.warnings} / ${table.maxWarnings}</strong>
+          <div class="dispatch-modal-actions">
+            <button type="button" class="dispatch-cancel-btn" onclick="closeWarningResetModal()">
+              Cancel
+            </button>
+
+            <button type="button" class="dispatch-confirm-btn" onclick="confirmWarningReset('${escapeJsString(table.id)}')">
+              Reset Warnings
+            </button>
           </div>
-
-          <div>
-            <span>Seated students</span>
-            <strong>${table.studentCount}</strong>
-          </div>
-        </div>
-
-        <div class="dispatch-modal-actions">
-          <button type="button" class="dispatch-cancel-btn" onclick="closeWarningResetModal()">
-            Cancel
-          </button>
-
-          <button type="button" class="dispatch-confirm-btn" onclick="confirmWarningReset('${escapeJsString(table.id)}')">
-            Reset Warnings
-          </button>
         </div>
       </div>
     `;

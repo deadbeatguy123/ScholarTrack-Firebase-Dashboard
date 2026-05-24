@@ -2416,3 +2416,309 @@ button:focus-visible,
 .three-strike-actions {
   margin-top: 4px;
 }
+
+
+/* Visual accent popups and smoother modal motion */
+.modal-overlay:not(.hidden) {
+  animation: modalOverlayFadeIn 0.24s ease both;
+}
+
+@keyframes modalOverlayFadeIn {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+
+  to {
+    opacity: 1;
+    backdrop-filter: blur(7px);
+  }
+}
+
+.student-modal-card,
+.dispatch-modal-card,
+.three-strike-modal-card {
+  transform-origin: center;
+  animation: modalCardEnter 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes modalCardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.visual-modal-card {
+  width: min(540px, 100%);
+  max-height: min(720px, 90vh);
+  padding: 0;
+  text-align: center;
+  overflow: hidden;
+}
+
+.visual-modal-hero {
+  height: 218px;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(219, 234, 254, 0.65), transparent 34%),
+    linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.visual-modal-hero img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.visual-modal-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.88) 100%),
+    radial-gradient(circle at 72% 18%, rgba(37, 99, 235, 0.10), transparent 34%);
+  pointer-events: none;
+}
+
+.visual-modal-badge {
+  position: absolute;
+  left: 22px;
+  bottom: 18px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(191, 219, 254, 0.94);
+  color: #1d4ed8;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(12px);
+}
+
+.visual-modal-badge .material-symbols-outlined {
+  font-size: 22px;
+}
+
+.visual-modal-badge strong {
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.visual-modal-content {
+  padding: 24px 28px 28px;
+}
+
+.visual-modal-content h3 {
+  margin: 0;
+  color: #071426;
+  font-size: 26px;
+  line-height: 1.15;
+  font-weight: 950;
+  letter-spacing: -0.05em;
+}
+
+.visual-modal-content p {
+  max-width: 430px;
+  margin: 11px auto 20px;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.55;
+  font-weight: 650;
+}
+
+.visual-modal-mini-info {
+  min-height: 46px;
+  margin: 0 0 18px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+  color: #1e3a8a;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  font-size: 13px;
+}
+
+.visual-modal-mini-info.danger {
+  border-color: #fecaca;
+  background: #fff7f7;
+  color: #b91c1c;
+}
+
+.visual-modal-mini-info .material-symbols-outlined {
+  font-size: 20px;
+}
+
+.visual-modal-mini-info strong {
+  font-weight: 900;
+}
+
+.no-warning-hero {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(220, 252, 231, 0.65), transparent 32%),
+    linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.no-warning-hero img {
+  object-fit: contain;
+  padding: 18px;
+  opacity: 0.88;
+  filter: grayscale(1) contrast(1.04);
+  transform: scale(1.08);
+}
+
+.no-warning-overlay {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.90) 100%),
+    radial-gradient(circle at 50% 10%, rgba(16, 185, 129, 0.10), transparent 34%);
+}
+
+.no-warning-badge {
+  color: #047857;
+  border-color: #bbf7d0;
+}
+
+.no-warning-hero.image-missing::before {
+  content: "No warnings";
+  position: absolute;
+  inset: 0;
+  color: #047857;
+  font-size: 28px;
+  font-weight: 950;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dispatch-hero {
+  height: 238px;
+  background:
+    radial-gradient(circle at 50% 24%, rgba(254, 226, 226, 0.78), transparent 34%),
+    linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.dispatch-police-img {
+  position: absolute;
+  left: 50%;
+  bottom: -18px;
+  width: 78%;
+  height: 108%;
+  object-fit: contain !important;
+  object-position: center bottom;
+  transform: translateX(-50%);
+  opacity: 0.94;
+  filter: saturate(1.05) contrast(1.03);
+}
+
+.dispatch-siren-img {
+  position: absolute;
+  right: 26px;
+  top: 20px;
+  width: 84px !important;
+  height: 84px !important;
+  object-fit: contain !important;
+  opacity: 0.96;
+  filter: drop-shadow(0 14px 22px rgba(220, 38, 38, 0.22));
+  animation: sirenPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes sirenPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 14px 22px rgba(220, 38, 38, 0.18));
+  }
+
+  50% {
+    transform: scale(1.06);
+    filter: drop-shadow(0 18px 32px rgba(220, 38, 38, 0.36));
+  }
+}
+
+.dispatch-badge {
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.dispatch-hero.police-missing::before {
+  content: "!";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  background: #fee2e2;
+  color: #dc2626;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 56px;
+  font-weight: 950;
+  transform: translate(-50%, -50%);
+}
+
+.reset-visual-card {
+  padding-top: 28px;
+}
+
+.reset-visual-icon {
+  width: 68px;
+  height: 68px;
+  margin: 0 auto 8px;
+  border-radius: 50%;
+  background: #eff6ff;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.reset-visual-icon .material-symbols-outlined {
+  font-size: 32px;
+}
+
+.reset-visual-content {
+  padding-top: 12px;
+}
+
+/* Remove old summary-table look from these updated popups */
+.visual-modal-card .dispatch-modal-summary,
+.three-strike-modal-card .three-strike-summary {
+  display: none !important;
+}
+
+@media (max-width: 920px) {
+  .visual-modal-hero {
+    height: 178px;
+  }
+
+  .dispatch-hero {
+    height: 198px;
+  }
+
+  .dispatch-siren-img {
+    width: 64px !important;
+    height: 64px !important;
+    right: 18px;
+    top: 16px;
+  }
+
+  .visual-modal-content h3 {
+    font-size: 22px;
+  }
+
+  .visual-modal-content {
+    padding: 22px;
+  }
+}
