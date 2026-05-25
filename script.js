@@ -2,6 +2,7 @@
   "use strict";
 
   const FIREBASE_DB_URL = "https://micropit-91298-default-rtdb.asia-southeast1.firebasedatabase.app";
+
   const THREE_STRIKE_IMAGE_SRC = "assets/three-strikes-noise.png";
   const NO_WARNINGS_IMAGE_SRC = "assets/no-warnings-sign.png";
   const DISPATCH_SIREN_IMAGE_SRC = "assets/dispatch-siren.png";
@@ -21,12 +22,15 @@
   const SEATS_PER_TABLE = 4;
   const DEFAULT_MAX_WARNINGS = 3;
   const DEFAULT_REFRESH_INTERVAL_MS = 5000;
+  const SENSOR_HEALTH_CHECK_INTERVAL_MS = 2000;
+  const SENSOR_UPDATE_TIMEOUT_MS = 10000;
   const OVERVIEW_TITLE_SCROLL_RANGE_PX = 150;
 
   let firebaseDevices = {};
   let dashboardData = createEmptyDashboardData();
   let refreshInterval = DEFAULT_REFRESH_INTERVAL_MS;
   let autoRefreshTimer = null;
+  let sensorHealthTimer = null;
   let lastSuccessfulFetchAt = null;
   let scrollFrame = null;
 
@@ -39,6 +43,10 @@
 
   let threeStrikeAlertQueue = [];
   let threeStrikeModalOpen = false;
+
+  const sensorOutageAlertedTables = new Set();
+  let sensorOutageAlertQueue = [];
+  let sensorOutageModalOpen = false;
 
   let mainContent = null;
   let sidebar = null;
@@ -58,6 +66,7 @@
     setHeaderMode("overview");
     refreshData();
     startAutoRefresh();
+    startSensorHealthMonitor();
   });
 
   function createEmptyDashboardData() {
@@ -161,21 +170,23 @@
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) {
         stopAutoRefresh();
+        stopSensorHealthMonitor();
       } else {
         refreshData();
         startAutoRefresh();
+        startSensorHealthMonitor();
       }
     });
 
-    window.addEventListener("beforeunload", stopAutoRefresh);
+    window.addEventListener("beforeunload", function () {
+      stopAutoRefresh();
+      stopSensorHealthMonitor();
+    });
   }
 
   function setupAudioUnlockListeners() {
     const unlock = function () {
       unlockAudioContext();
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
-      window.removeEventListener("touchstart", unlock);
     };
 
     window.addEventListener("pointerdown", unlock, { passive: true });
@@ -231,7 +242,9 @@
 
     if (
       interactiveElement.classList.contains("dispatch-confirm-btn") ||
-      interactiveElement.classList.contains("dispatch-btn")
+      interactiveElement.classList.contains("dispatch-btn") ||
+      interactiveElement.classList.contains("sensor-check-btn") ||
+      interactiveElement.classList.contains("remove-student-confirm-btn")
     ) {
       playUiSound("success");
       return;
@@ -242,7 +255,9 @@
       interactiveElement.classList.contains("student-modal-close") ||
       interactiveElement.classList.contains("noise-close-button") ||
       interactiveElement.classList.contains("search-clear-btn") ||
-      interactiveElement.classList.contains("three-strike-close-btn")
+      interactiveElement.classList.contains("three-strike-close-btn") ||
+      interactiveElement.classList.contains("sensor-dismiss-btn") ||
+      interactiveElement.classList.contains("remove-student-cancel-btn")
     ) {
       playUiSound("soft");
       return;
@@ -263,6 +278,14 @@
         { frequency: 740, start: 0.00, duration: 0.08, gain: 0.032 },
         { frequency: 960, start: 0.10, duration: 0.10, gain: 0.036 },
         { frequency: 1180, start: 0.23, duration: 0.16, gain: 0.030 }
+      ]);
+      return;
+    }
+
+    if (type === "warning") {
+      playToneSequence([
+        { frequency: 520, start: 0.00, duration: 0.08, gain: 0.026 },
+        { frequency: 410, start: 0.12, duration: 0.12, gain: 0.026 }
       ]);
       return;
     }
@@ -415,6 +438,8 @@
 
       pruneNoiseViewState();
       handleThreeStrikeTransitions(dashboardData.tables);
+      checkSensorUpdateHealth({ render: false });
+
       renderTables(searchInput ? searchInput.value : "");
       renderLogs();
       updateStats();
@@ -426,6 +451,391 @@
       console.error("Firebase fetch error:", error);
       updateConnectionStatus(false, "Firebase read failed");
     }
+  }
+
+  function mapFirebaseDevicesToDashboard(devices) {
+    const now = Date.now();
+
+    const tables = TABLE_CONFIG.map(function (tableConfig) {
+      const device = isPlainObject(devices[tableConfig.unitId])
+        ? devices[tableConfig.unitId]
+        : {};
+
+      const audio = isPlainObject(device.audio) ? device.audio : {};
+      const students = getCurrentStudentsFromDevice(device);
+      const studentCount = students.length;
+      const available = studentCount === 0;
+
+      const noisyThreshold = toNumber(audio.noisy_threshold, 83);
+      const loudThreshold = toNumber(audio.loud_threshold, 90);
+      const receivedDb = toNumber(audio.received_db, 0);
+      const audioLevel = Number.isFinite(Number(audio.level)) ? Number(audio.level) : null;
+
+      const lastNoiseUpdateMs = extractNoiseUpdateTimestamp(device, audio);
+      const hasNoiseSensor = hasNoiseSensorData(device, audio);
+      const sensorAgeMs = getSensorAgeMs(lastNoiseUpdateMs, now);
+      const sensorStale = isSensorStale(hasNoiseSensor, lastNoiseUpdateMs, now);
+      const sensorOnline = hasNoiseSensor && Boolean(lastNoiseUpdateMs) && !sensorStale;
+      const syncState = sensorOnline ? "online" : "offline";
+
+      let warnings = 0;
+      let status = "quiet";
+
+      if (!available) {
+        warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
+
+        if (warnings >= DEFAULT_MAX_WARNINGS) {
+          status = "critical";
+        } else {
+          status = getStatusFromAudio(audio);
+        }
+      }
+
+      return {
+        id: tableConfig.id,
+        unitId: tableConfig.unitId,
+        status,
+        warnings,
+        maxWarnings: DEFAULT_MAX_WARNINGS,
+        studentCount,
+        students,
+        available,
+        noiseLevel: receivedDb,
+        noisyThreshold,
+        loudThreshold,
+        audioLevel,
+        updatedAt: lastNoiseUpdateMs || audio.updated_at || device.updated_at || null,
+        lastNoiseUpdateMs,
+        hasNoiseSensor,
+        sensorAgeMs,
+        sensorStale,
+        sensorOnline,
+        syncState
+      };
+    });
+
+    const currentOccupancy = tables.reduce(function (sum, table) {
+      return sum + table.studentCount;
+    }, 0);
+
+    const activeWarnings = tables.reduce(function (sum, table) {
+      return sum + table.warnings;
+    }, 0);
+
+    const highestNoise = tables.reduce(function (max, table) {
+      return Math.max(max, table.noiseLevel || 0);
+    }, 0);
+
+    return {
+      tables,
+      occupancy: {
+        current: currentOccupancy,
+        max: tables.length * SEATS_PER_TABLE
+      },
+      warnings: activeWarnings,
+      sensors: {
+        noiseLevel: highestNoise
+      }
+    };
+  }
+
+  function hasNoiseSensorData(device, audio) {
+    if (!isPlainObject(device) || Object.keys(device).length === 0) {
+      return false;
+    }
+
+    if (!isPlainObject(audio) || Object.keys(audio).length === 0) {
+      return false;
+    }
+
+    return [
+      "received_db",
+      "level",
+      "updated_at",
+      "updatedAt",
+      "lastNoiseUpdate",
+      "noiseLastUpdated",
+      "last_noise_update",
+      "noise_last_updated"
+    ].some(function (key) {
+      return audio[key] !== undefined && audio[key] !== null;
+    });
+  }
+
+  function extractNoiseUpdateTimestamp(device, audio) {
+    const candidates = [
+      audio.lastNoiseUpdate,
+      audio.noiseLastUpdated,
+      audio.last_noise_update,
+      audio.noise_last_updated,
+      audio.updated_at,
+      audio.updatedAt,
+      audio.timestamp,
+      audio.scanned_at,
+      device.lastNoiseUpdate,
+      device.noiseLastUpdated,
+      device.last_noise_update,
+      device.noise_last_updated,
+      device.updated_at,
+      device.updatedAt,
+      device.timestamp
+    ];
+
+    for (const candidate of candidates) {
+      const timestamp = parseFirebaseTimestamp(candidate);
+
+      if (timestamp !== null) {
+        return timestamp;
+      }
+    }
+
+    return null;
+  }
+
+  function parseFirebaseTimestamp(value) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value < 10000000000 ? value * 1000 : value;
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+
+      if (!trimmed) {
+        return null;
+      }
+
+      const numeric = Number(trimmed);
+
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric < 10000000000 ? numeric * 1000 : numeric;
+      }
+
+      const parsedDate = Date.parse(trimmed);
+
+      if (Number.isFinite(parsedDate)) {
+        return parsedDate;
+      }
+    }
+
+    return null;
+  }
+
+  function getSensorAgeMs(lastNoiseUpdateMs, now) {
+    if (!lastNoiseUpdateMs) {
+      return null;
+    }
+
+    return Math.max(now - lastNoiseUpdateMs, 0);
+  }
+
+  function isSensorStale(hasNoiseSensor, lastNoiseUpdateMs, now) {
+    if (!hasNoiseSensor || !lastNoiseUpdateMs) {
+      return false;
+    }
+
+    return getSensorAgeMs(lastNoiseUpdateMs, now) > SENSOR_UPDATE_TIMEOUT_MS;
+  }
+
+  function startSensorHealthMonitor() {
+    stopSensorHealthMonitor();
+
+    sensorHealthTimer = setInterval(function () {
+      checkSensorUpdateHealth({ render: true });
+    }, SENSOR_HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  function stopSensorHealthMonitor() {
+    if (sensorHealthTimer) {
+      clearInterval(sensorHealthTimer);
+      sensorHealthTimer = null;
+    }
+  }
+
+  function checkSensorUpdateHealth(options = {}) {
+    const shouldRender = options.render !== false;
+    const now = Date.now();
+    let changed = false;
+
+    dashboardData.tables.forEach(function (table) {
+      const previousStale = table.sensorStale;
+      const previousOnline = table.sensorOnline;
+
+      table.sensorAgeMs = getSensorAgeMs(table.lastNoiseUpdateMs, now);
+      table.sensorStale = isSensorStale(table.hasNoiseSensor, table.lastNoiseUpdateMs, now);
+      table.sensorOnline = table.hasNoiseSensor && Boolean(table.lastNoiseUpdateMs) && !table.sensorStale;
+      table.syncState = table.sensorOnline ? "online" : "offline";
+
+      if (table.sensorStale) {
+        visibleNoiseTables.delete(table.id);
+      }
+
+      if (!table.sensorStale) {
+        sensorOutageAlertedTables.delete(table.id);
+      }
+
+      if (table.sensorStale && !sensorOutageAlertedTables.has(table.id)) {
+        sensorOutageAlertedTables.add(table.id);
+        enqueueSensorOutageAlert(table);
+      }
+
+      if (previousStale !== table.sensorStale || previousOnline !== table.sensorOnline) {
+        changed = true;
+      }
+    });
+
+    if (shouldRender && changed) {
+      renderTables(searchInput ? searchInput.value : "");
+      renderLogs();
+      updateHeaderPopovers();
+      updateSensorDisplay();
+    }
+  }
+
+  function enqueueSensorOutageAlert(table) {
+    sensorOutageAlertQueue.push({
+      id: table.id,
+      unitId: table.unitId,
+      noiseLevel: table.noiseLevel,
+      lastNoiseUpdateMs: table.lastNoiseUpdateMs,
+      sensorAgeMs: table.sensorAgeMs
+    });
+
+    showNextSensorOutageAlert();
+  }
+
+  function showNextSensorOutageAlert() {
+    if (sensorOutageModalOpen || sensorOutageAlertQueue.length === 0) {
+      return;
+    }
+
+    const alertData = sensorOutageAlertQueue.shift();
+    showSensorOutageModal(alertData);
+  }
+
+  function showSensorOutageModal(alertData) {
+    const overlay = ensureSensorOutageModal();
+
+    sensorOutageModalOpen = true;
+
+    overlay.innerHTML = `
+      <div class="sensor-outage-card" role="dialog" aria-modal="true">
+        <div class="sensor-outage-hero">
+          <div class="sensor-outage-icon">
+            <span class="material-symbols-outlined">sensors_off</span>
+          </div>
+
+          <div class="sensor-outage-rings">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+
+          <div class="sensor-outage-badge">
+            <span class="material-symbols-outlined">sync_problem</span>
+            <strong>No recent updates</strong>
+          </div>
+        </div>
+
+        <div class="sensor-outage-content">
+          <h3>Table ${escapeHtml(alertData.id)} sensor is not updating</h3>
+
+          <p>
+            No new noise sensor readings have been received for the last 10 seconds.
+            The table status may be outdated. Please check the table device, sensor wiring,
+            power supply, and internet connection.
+          </p>
+
+          <div class="sensor-troubleshooting" id="sensorTroubleshootingPanel">
+            <h4>Troubleshooting reminders</h4>
+
+            <ul>
+              <li>Make sure the ESP32 is powered on.</li>
+              <li>Check if the noise sensor is connected properly.</li>
+              <li>Check if the device has internet connection.</li>
+              <li>Check if Firebase is receiving new data.</li>
+              <li>Restart the table device if needed.</li>
+            </ul>
+          </div>
+
+          <div class="sensor-outage-actions">
+            <button
+              type="button"
+              class="sensor-check-btn"
+              onclick="showSensorTroubleshooting()"
+            >
+              Check Device
+            </button>
+
+            <button
+              type="button"
+              class="sensor-dismiss-btn"
+              onclick="dismissSensorOutageModal()"
+            >
+              Dismiss for now
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+    playUiSound("warning");
+  }
+
+  function ensureSensorOutageModal() {
+    let overlay = document.getElementById("sensorOutageOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "sensorOutageOverlay";
+    overlay.className = "modal-overlay sensor-outage-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        dismissSensorOutageModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function showSensorTroubleshooting() {
+    const panel = document.getElementById("sensorTroubleshootingPanel");
+
+    if (panel) {
+      panel.classList.add("open");
+    }
+
+    const button = document.querySelector(".sensor-check-btn");
+
+    if (button) {
+      button.textContent = "Checklist shown";
+      button.disabled = true;
+    }
+  }
+
+  function dismissSensorOutageModal() {
+    const overlay = document.getElementById("sensorOutageOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    sensorOutageModalOpen = false;
+    document.body.classList.remove("modal-open");
+    playUiSound("soft");
+
+    window.setTimeout(showNextSensorOutageAlert, 120);
   }
 
   function handleThreeStrikeTransitions(tables) {
@@ -560,89 +970,31 @@
         visibleNoiseTables.delete(tableId);
       }
     });
-  }
 
-  function mapFirebaseDevicesToDashboard(devices) {
-    const tables = TABLE_CONFIG.map(function (tableConfig) {
-      const device = isPlainObject(devices[tableConfig.unitId])
-        ? devices[tableConfig.unitId]
-        : {};
-
-      const audio = isPlainObject(device.audio) ? device.audio : {};
-      const students = getCurrentStudentsFromDevice(device);
-      const studentCount = students.length;
-      const available = studentCount === 0;
-
-      const noisyThreshold = toNumber(audio.noisy_threshold, 83);
-      const loudThreshold = toNumber(audio.loud_threshold, 90);
-      const receivedDb = toNumber(audio.received_db, 0);
-      const audioLevel = Number.isFinite(Number(audio.level)) ? Number(audio.level) : null;
-
-      let warnings = 0;
-      let status = "quiet";
-
-      if (!available) {
-        warnings = getWarningCount(device, DEFAULT_MAX_WARNINGS);
-
-        if (warnings >= DEFAULT_MAX_WARNINGS) {
-          status = "critical";
-        } else {
-          status = getStatusFromAudio(audio);
-        }
+    dashboardData.tables.forEach(function (table) {
+      if (table.sensorStale) {
+        visibleNoiseTables.delete(table.id);
       }
-
-      return {
-        id: tableConfig.id,
-        unitId: tableConfig.unitId,
-        status,
-        warnings,
-        maxWarnings: DEFAULT_MAX_WARNINGS,
-        studentCount,
-        students,
-        available,
-        noiseLevel: receivedDb,
-        noisyThreshold,
-        loudThreshold,
-        audioLevel,
-        updatedAt: audio.updated_at || device.updated_at || null
-      };
     });
-
-    const currentOccupancy = tables.reduce(function (sum, table) {
-      return sum + table.studentCount;
-    }, 0);
-
-    const activeWarnings = tables.reduce(function (sum, table) {
-      return sum + table.warnings;
-    }, 0);
-
-    const highestNoise = tables.reduce(function (max, table) {
-      return Math.max(max, table.noiseLevel || 0);
-    }, 0);
-
-    return {
-      tables,
-      occupancy: {
-        current: currentOccupancy,
-        max: tables.length * SEATS_PER_TABLE
-      },
-      warnings: activeWarnings,
-      sensors: {
-        noiseLevel: highestNoise
-      }
-    };
   }
 
   function getCurrentStudentsFromDevice(device) {
-    const source = device.current_students || device.qr_codes || {};
-    const entries = getObjectEntries(source);
+    const currentStudentEntries = getObjectEntries(device.current_students);
 
-    return entries.map(function ([key, value]) {
-      return normalizeStudentRecord(key, value);
+    if (currentStudentEntries.length > 0) {
+      return currentStudentEntries.map(function ([key, value]) {
+        return normalizeStudentRecord(key, value, "current_students");
+      });
+    }
+
+    const qrCodeEntries = getObjectEntries(device.qr_codes);
+
+    return qrCodeEntries.map(function ([key, value]) {
+      return normalizeStudentRecord(key, value, "qr_codes");
     });
   }
 
-  function normalizeStudentRecord(key, value) {
+  function normalizeStudentRecord(key, value, sourceCollection) {
     const record = isPlainObject(value) ? value : { payload: String(value ?? "") };
 
     const payload = String(
@@ -694,6 +1046,7 @@
 
     return {
       key,
+      sourceCollection,
       payload,
       name,
       studentId,
@@ -774,7 +1127,9 @@
           const tableMatches =
             table.id.toLowerCase().includes(normalizedSearch) ||
             table.unitId.toLowerCase().includes(normalizedSearch) ||
-            table.status.toLowerCase().includes(normalizedSearch);
+            table.status.toLowerCase().includes(normalizedSearch) ||
+            table.syncState.toLowerCase().includes(normalizedSearch) ||
+            (table.sensorStale ? "offline sensor not updating no recent updates".includes(normalizedSearch) : false);
 
           const studentMatches = table.students.some(function (student) {
             return [
@@ -795,7 +1150,7 @@
   }
 
   function createTableCard(table) {
-    const noiseViewOpen = visibleNoiseTables.has(table.id);
+    const noiseViewOpen = visibleNoiseTables.has(table.id) && !table.sensorStale;
 
     if (table.available) {
       return createAvailableTableCard(table, noiseViewOpen);
@@ -807,15 +1162,18 @@
     const firstStudent = table.students[0] || null;
 
     return `
-      <article class="table-card occupied-card ${isDispatchReady ? "critical" : ""} ${noiseViewOpen ? "noise-mode" : ""}">
+      <article class="table-card occupied-card ${isDispatchReady ? "critical" : ""} ${noiseViewOpen ? "noise-mode" : ""} ${table.sensorStale ? "sensor-stale" : ""}">
         <div class="table-card-header">
           <div class="seat-icon">
             <span class="material-symbols-outlined">event_seat</span>
           </div>
 
-          <h4>Table ${escapeHtml(table.id)}</h4>
-
-          ${createStatusToggle(table, statusClass, statusLabel, noiseViewOpen)}
+          <div class="table-title-state">
+            <div class="table-title-line">
+              <h4>Table ${escapeHtml(table.id)}</h4>
+              ${createHeaderStatus(table, statusClass, statusLabel, noiseViewOpen)}
+            </div>
+          </div>
         </div>
 
         ${
@@ -897,15 +1255,18 @@
 
   function createAvailableTableCard(table, noiseViewOpen) {
     return `
-      <article class="table-card available-card available ${noiseViewOpen ? "noise-mode" : ""}">
+      <article class="table-card available-card available ${noiseViewOpen ? "noise-mode" : ""} ${table.sensorStale ? "sensor-stale" : ""}">
         <div class="table-card-header">
           <div class="seat-icon muted">
             <span class="material-symbols-outlined">event_seat</span>
           </div>
 
-          <h4>Table ${escapeHtml(table.id)}</h4>
-
-          ${createStatusToggle(table, "quiet", "Quiet", noiseViewOpen)}
+          <div class="table-title-state">
+            <div class="table-title-line">
+              <h4>Table ${escapeHtml(table.id)}</h4>
+              ${createHeaderStatus(table, "quiet", "Quiet", noiseViewOpen)}
+            </div>
+          </div>
         </div>
 
         ${
@@ -920,6 +1281,41 @@
         }
       </article>
     `;
+  }
+
+  function createHeaderStatus(table, statusClass, statusLabel, noiseViewOpen) {
+    if (table.sensorStale) {
+      return createOfflineStatus(table);
+    }
+
+    return createStatusToggle(table, statusClass, statusLabel, noiseViewOpen);
+  }
+
+  function createOfflineStatus(table) {
+    return `
+      <span class="offline-status-pill" title="${escapeHtml(getSensorTitle(table))}">
+        <span></span>
+        <strong>Offline</strong>
+      </span>
+    `;
+  }
+
+  function getSensorTitle(table) {
+    if (!table.hasNoiseSensor) {
+      return "No active sensor data detected for this table.";
+    }
+
+    if (!table.lastNoiseUpdateMs) {
+      return "Sensor timestamp is not available.";
+    }
+
+    const ageSeconds = Math.floor((table.sensorAgeMs || 0) / 1000);
+
+    if (table.sensorStale) {
+      return `No new noise sensor update for ${ageSeconds} seconds.`;
+    }
+
+    return `Last noise sensor update was ${ageSeconds} seconds ago.`;
   }
 
   function createStatusToggle(table, statusClass, statusLabel, noiseViewOpen) {
@@ -1025,6 +1421,14 @@
   }
 
   function toggleNoiseView(tableId) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table || table.sensorStale) {
+      return;
+    }
+
     if (visibleNoiseTables.has(tableId)) {
       visibleNoiseTables.delete(tableId);
     } else {
@@ -1063,6 +1467,13 @@
         logs.push({
           time: normalizeTimestamp(table.updatedAt),
           action: `Warning level ${table.warnings}/${table.maxWarnings} recorded for Table ${table.id}`
+        });
+      }
+
+      if (table.sensorStale) {
+        logs.push({
+          time: Date.now(),
+          action: `Sensor not updating for Table ${table.id}`
         });
       }
     });
@@ -1148,7 +1559,7 @@
         return `
           <div class="warning-table-row">
             <span>Table ${escapeHtml(table.id)}</span>
-            <strong>${table.warnings}</strong>
+            <strong>${escapeHtml(table.warnings)}</strong>
           </div>
         `;
       }).join("");
@@ -1172,8 +1583,14 @@
     }
 
     const noiseLevel = toNumber(dashboardData.sensors.noiseLevel, 0);
+    const staleCount = dashboardData.tables.filter(function (table) {
+      return table.sensorStale;
+    }).length;
+
+    const staleText = staleCount > 0 ? ` · ${staleCount} offline sensor${staleCount === 1 ? "" : "s"}` : "";
     const updatedText = lastSuccessfulFetchAt ? ` · Updated ${formatTime(lastSuccessfulFetchAt)}` : "";
-    sensorDataElement.textContent = `Noise: ${noiseLevel.toFixed(2)}dB${updatedText}`;
+
+    sensorDataElement.textContent = `Noise: ${noiseLevel.toFixed(2)}dB${updatedText}${staleText}`;
   }
 
   function updateConnectionStatus(connected, text = "") {
@@ -1284,7 +1701,7 @@
 
   function generateReport() {
     const rows = [
-      ["Table", "Unit", "Status", "Warnings", "Students", "Noise dB", "Last Updated"]
+      ["Table", "Unit", "Status", "Sensor State", "Warnings", "Students", "Noise dB", "Last Noise Update"]
     ];
 
     dashboardData.tables.forEach(function (table) {
@@ -1292,10 +1709,11 @@
         `Table ${table.id}`,
         table.unitId,
         table.status,
+        table.sensorStale ? "Offline" : "Online",
         String(table.warnings),
         String(table.studentCount),
         String(table.noiseLevel),
-        table.updatedAt ? formatDateTime(normalizeTimestamp(table.updatedAt)) : ""
+        table.lastNoiseUpdateMs ? formatDateTime(table.lastNoiseUpdateMs) : ""
       ]);
     });
 
@@ -1312,15 +1730,19 @@
 
   function showNotifications() {
     const activeTables = dashboardData.tables.filter(function (table) {
-      return table.studentCount > 0 && table.status === "critical";
+      return table.studentCount > 0 && (table.status === "critical" || table.sensorStale);
     });
 
     if (activeTables.length === 0) {
-      alert("No active critical occupied tables.");
+      alert("No active critical or offline sensor tables.");
       return;
     }
 
     alert(activeTables.map(function (table) {
+      if (table.sensorStale) {
+        return `Offline sensor: Table ${table.id}`;
+      }
+
       return `Critical: Table ${table.id}`;
     }).join("\n"));
   }
@@ -1349,7 +1771,7 @@
           const displayPayload = student.payload || "";
 
           return `
-            <div class="student-modal-row">
+            <div class="student-modal-row removable-student-row">
               <div class="student-modal-avatar">
                 ${escapeHtml(student.initials || "ST")}
               </div>
@@ -1370,6 +1792,17 @@
               </div>
 
               <div class="student-modal-number">${index + 1}</div>
+
+              <button
+                class="student-remove-btn"
+                type="button"
+                onclick="requestRemoveStudent('${escapeJsString(table.id)}', '${escapeJsString(student.key)}', '${escapeJsString(student.sourceCollection)}')"
+                aria-label="Remove ${escapeHtml(displayName)} from Table ${escapeHtml(table.id)}"
+                title="Remove student"
+              >
+                <span class="material-symbols-outlined">delete</span>
+                <strong>Remove</strong>
+              </button>
             </div>
           `;
         }).join("")
@@ -1435,6 +1868,194 @@
     document.body.classList.remove("modal-open");
   }
 
+  function requestRemoveStudent(tableId, studentKey, sourceCollection) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    const student = table.students.find(function (item) {
+      return item.key === studentKey && item.sourceCollection === sourceCollection;
+    });
+
+    if (!student) {
+      alert("This student entry was not found. Refresh the dashboard and try again.");
+      return;
+    }
+
+    showRemoveStudentConfirmModal(table, student);
+  }
+
+  function showRemoveStudentConfirmModal(table, student) {
+    const overlay = ensureRemoveStudentConfirmModal();
+
+    overlay.innerHTML = `
+      <div class="remove-student-card" role="dialog" aria-modal="true">
+        <div class="remove-student-icon">
+          <span class="material-symbols-outlined">person_remove</span>
+        </div>
+
+        <div class="remove-student-content">
+          <h3>Remove seated student?</h3>
+
+          <p>
+            Are you sure you want to remove
+            <strong>${escapeHtml(student.name || "this student")}</strong>
+            from Table ${escapeHtml(table.id)}?
+          </p>
+
+          <div class="remove-student-preview">
+            <div class="student-modal-avatar">
+              ${escapeHtml(student.initials || "ST")}
+            </div>
+
+            <div>
+              <strong>${escapeHtml(student.name || "Registered Student")}</strong>
+              <span>ID: ${escapeHtml(student.studentId || "No ID found")}</span>
+            </div>
+          </div>
+
+          <div class="remove-student-actions">
+            <button type="button" class="remove-student-cancel-btn" onclick="closeRemoveStudentConfirmModal()">
+              Cancel
+            </button>
+
+            <button
+              type="button"
+              class="remove-student-confirm-btn"
+              onclick="confirmRemoveStudent('${escapeJsString(table.id)}', '${escapeJsString(student.key)}', '${escapeJsString(student.sourceCollection)}')"
+            >
+              Remove Student
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function ensureRemoveStudentConfirmModal() {
+    let overlay = document.getElementById("removeStudentConfirmOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "removeStudentConfirmOverlay";
+    overlay.className = "modal-overlay remove-student-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeRemoveStudentConfirmModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function closeRemoveStudentConfirmModal() {
+    const overlay = document.getElementById("removeStudentConfirmOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    const studentOverlay = document.getElementById("studentModalOverlay");
+    const studentModalStillOpen = studentOverlay && !studentOverlay.classList.contains("hidden");
+
+    if (!studentModalStillOpen) {
+      document.body.classList.remove("modal-open");
+    }
+  }
+
+  async function confirmRemoveStudent(tableId, studentKey, sourceCollection) {
+    const table = dashboardData.tables.find(function (item) {
+      return item.id === tableId;
+    });
+
+    if (!table) {
+      alert(`Table ${tableId} was not found.`);
+      return;
+    }
+
+    const student = table.students.find(function (item) {
+      return item.key === studentKey && item.sourceCollection === sourceCollection;
+    });
+
+    if (!student) {
+      alert("This student entry was not found. Refresh the dashboard and try again.");
+      closeRemoveStudentConfirmModal();
+      return;
+    }
+
+    try {
+      await removeStudentFromFirebase(table, student);
+      removeStudentLocally(table, student);
+
+      closeRemoveStudentConfirmModal();
+
+      const studentOverlay = document.getElementById("studentModalOverlay");
+
+      if (studentOverlay && !studentOverlay.classList.contains("hidden")) {
+        showSeatedStudentsModal(tableId);
+      }
+    } catch (error) {
+      console.error("Failed to remove student:", error);
+      alert("Student removal failed. Check Firebase write rules or internet connection.");
+    }
+  }
+
+  async function removeStudentFromFirebase(table, student) {
+    const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
+    const collection = student.sourceCollection || "qr_codes";
+    const path = `devices/${encodeURIComponent(table.unitId)}/${encodeURIComponent(collection)}/${encodeURIComponent(student.key)}`;
+    const url = `${databaseUrl}/${path}.json?print=silent`;
+
+    const response = await fetch(url, {
+      method: "DELETE"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Student removal failed: ${response.status}`);
+    }
+  }
+
+  function removeStudentLocally(table, student) {
+    const unit = firebaseDevices[table.unitId];
+
+    if (!isPlainObject(unit)) {
+      return;
+    }
+
+    const collection = student.sourceCollection || "qr_codes";
+
+    if (Array.isArray(unit[collection])) {
+      delete unit[collection][Number(student.key)];
+    } else if (isPlainObject(unit[collection])) {
+      delete unit[collection][student.key];
+
+      if (Object.keys(unit[collection]).length === 0) {
+        delete unit[collection];
+      }
+    }
+
+    dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
+
+    renderTables(searchInput ? searchInput.value : "");
+    renderLogs();
+    updateStats();
+    updateSensorDisplay();
+  }
+
   function dispatchIntervention(tableId) {
     const table = dashboardData.tables.find(function (item) {
       return item.id === tableId;
@@ -1480,8 +2101,8 @@
           <h3>Dispatch intervention?</h3>
 
           <p>
-            This will generate a CSV report for Table ${escapeHtml(table.id)}
-            and reset its warning count.
+            This will generate a CSV report for Table ${escapeHtml(table.id)},
+            reset its warning count, and clear all currently seated students from this table.
           </p>
 
           <div class="visual-modal-mini-info danger">
@@ -1550,14 +2171,17 @@
 
     try {
       downloadDispatchCsv(table);
-      await resetWarningCountForTable(table, "dispatch");
 
-      updateLocalWarningCount(table, 0);
+      await resetWarningCountForTable(table, "dispatch");
+      await clearStudentsForTable(table, "dispatch");
+
+      updateLocalTableAfterDispatch(table);
 
       closeDispatchConfirmModal();
+      closeStudentsModal();
     } catch (error) {
       console.error("Failed to complete dispatch:", error);
-      alert("Dispatch failed. The CSV file may have downloaded, but the warning count was not reset. Check Firebase write rules.");
+      alert("Dispatch failed. The CSV file may have downloaded, but the Firebase updates were not completed. Check Firebase write rules.");
     }
   }
 
@@ -1727,6 +2351,35 @@
     updateSensorDisplay();
   }
 
+  function updateLocalTableAfterDispatch(table) {
+    if (!isPlainObject(firebaseDevices[table.unitId])) {
+      firebaseDevices[table.unitId] = {};
+    }
+
+    firebaseDevices[table.unitId].warning_count = 0;
+    firebaseDevices[table.unitId].last_warning_reset_local_at = Date.now();
+    firebaseDevices[table.unitId].last_students_cleared_local_at = Date.now();
+
+    delete firebaseDevices[table.unitId].current_students;
+    delete firebaseDevices[table.unitId].qr_codes;
+
+    if (isPlainObject(firebaseDevices[table.unitId].audio)) {
+      delete firebaseDevices[table.unitId].audio.warning_count;
+      delete firebaseDevices[table.unitId].audio.warningCount;
+      delete firebaseDevices[table.unitId].audio.warnings;
+    }
+
+    threeStrikeAlertedTables.delete(table.id);
+    previousWarningCounts.set(table.id, 0);
+
+    dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
+
+    renderTables(searchInput ? searchInput.value : "");
+    renderLogs();
+    updateStats();
+    updateSensorDisplay();
+  }
+
   function downloadDispatchCsv(table) {
     const generatedAt = new Date();
     const safeTableId = String(table.id).replace(/[^a-z0-9_-]/gi, "_");
@@ -1738,6 +2391,8 @@
       ["Table", table.id],
       ["Generated At", formatDateTime(generatedAt.getTime())],
       ["Warnings Before Dispatch", `${table.warnings} / ${table.maxWarnings}`],
+      ["Sensor State", table.sensorStale ? "Offline" : "Online"],
+      ["Last Noise Update", table.lastNoiseUpdateMs ? formatDateTime(table.lastNoiseUpdateMs) : ""],
       ["Total Seated Students", String(table.studentCount)],
       [],
       ["#", "Student Name", "ID Number", "Program", "Scanned At", "Raw QR Payload"]
@@ -1821,6 +2476,33 @@
 
     if (!audioResponse.ok) {
       throw new Error(`Audio warning reset failed: ${audioResponse.status}`);
+    }
+  }
+
+  async function clearStudentsForTable(table, reason) {
+    const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
+    const unitPath = `devices/${encodeURIComponent(table.unitId)}`;
+    const unitUrl = `${databaseUrl}/${unitPath}.json?print=silent`;
+
+    const patch = {
+      current_students: null,
+      qr_codes: null,
+      last_students_cleared_reason: reason || "manual_clear",
+      last_students_cleared_at: {
+        ".sv": "timestamp"
+      }
+    };
+
+    const response = await fetch(unitUrl, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(patch)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Student clearing failed: ${response.status}`);
     }
   }
 
@@ -1915,17 +2597,8 @@
   }
 
   function normalizeTimestamp(value) {
-    const number = Number(value);
-
-    if (!Number.isFinite(number) || number <= 0) {
-      return Date.now();
-    }
-
-    if (number < 10000000000) {
-      return number * 1000;
-    }
-
-    return number;
+    const timestamp = parseFirebaseTimestamp(value);
+    return timestamp || Date.now();
   }
 
   function formatTime(timestamp) {
@@ -1975,6 +2648,9 @@
   window.dispatchIntervention = dispatchIntervention;
   window.showSeatedStudentsModal = showSeatedStudentsModal;
   window.closeStudentsModal = closeStudentsModal;
+  window.requestRemoveStudent = requestRemoveStudent;
+  window.confirmRemoveStudent = confirmRemoveStudent;
+  window.closeRemoveStudentConfirmModal = closeRemoveStudentConfirmModal;
   window.confirmDispatchIntervention = confirmDispatchIntervention;
   window.closeDispatchConfirmModal = closeDispatchConfirmModal;
   window.showWarningResetModal = showWarningResetModal;
@@ -1983,4 +2659,6 @@
   window.toggleNoiseView = toggleNoiseView;
   window.refreshData = refreshData;
   window.closeThreeStrikeAlertModal = closeThreeStrikeAlertModal;
+  window.showSensorTroubleshooting = showSensorTroubleshooting;
+  window.dismissSensorOutageModal = dismissSensorOutageModal;
 })();
