@@ -19,7 +19,7 @@
     rel="stylesheet"
   />
 
-  <link rel="stylesheet" href="styles.css?v=6000" />
+  <link rel="stylesheet" href="styles.css?v=7000" />
 </head>
 
 <body>
@@ -234,7 +234,7 @@
           <div class="page-header">
             <div>
               <h3>Settings</h3>
-              <p>Configure dashboard preferences.</p>
+              <p>Configure dashboard preferences and hardware parameters.</p>
             </div>
           </div>
 
@@ -250,6 +250,28 @@
                 <option value="60">1 minute</option>
               </select>
             </div>
+
+            <button
+              class="setting-group hardware-config-entry"
+              type="button"
+              onclick="openHardwareConfigModal()"
+              aria-label="Open hardware configuration"
+            >
+              <div class="hardware-config-copy">
+                <span class="hardware-config-icon">
+                  <span class="material-symbols-outlined">tune</span>
+                </span>
+
+                <div>
+                  <label>Hardware Configuration</label>
+                  <p>Push threshold, timing, QR cooldown, and recalibration settings to a selected table device.</p>
+                </div>
+              </div>
+
+              <span class="hardware-config-open">
+                <span class="material-symbols-outlined">chevron_right</span>
+              </span>
+            </button>
 
             <div class="setting-group status-group">
               <label>Firebase Status</label>
@@ -287,6 +309,6 @@
     </a>
   </nav>
 
-  <script src="script.js?v=6000"></script>
+  <script src="script.js?v=7000"></script>
 </body>
 </html>

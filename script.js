@@ -19,6 +19,113 @@
     { id: "B4", unitId: "unit_H" }
   ];
 
+  const HARDWARE_CONFIG_SCHEMA = [
+    {
+      memoryKey: "g_quiet_ceiling",
+      databaseKey: "quiet_ceiling",
+      dataType: "float",
+      defaultValue: 75.0,
+      label: "Quiet Ceiling (dB)",
+      tooltip: "The upper limit threshold considered quiet. Sounds below this are ignored."
+    },
+    {
+      memoryKey: "g_noisy_threshold",
+      databaseKey: "noisy_threshold",
+      dataType: "float",
+      defaultValue: 80.0,
+      label: "Noisy Threshold (dB)",
+      tooltip: "The decibel level where the environment transitions from quiet to noisy."
+    },
+    {
+      memoryKey: "g_loud_threshold",
+      databaseKey: "loud_threshold",
+      dataType: "float",
+      defaultValue: 82.0,
+      label: "Loud Threshold (dB)",
+      tooltip: "The absolute high-volume threshold indicating a distinct loud event."
+    },
+    {
+      memoryKey: "g_noisy_hold_ms",
+      databaseKey: "noisy_hold_ms",
+      dataType: "ulong",
+      defaultValue: 3000,
+      label: "Noisy Hold Duration (ms)",
+      tooltip: "How long the system remains in the noisy state after detection finishes."
+    },
+    {
+      memoryKey: "g_loud_accum_ms",
+      databaseKey: "loud_accum_ms",
+      dataType: "ulong",
+      defaultValue: 3000,
+      label: "Loud Accumulation Window (ms)",
+      tooltip: "The rolling time window over which loud audio spikes are accumulated."
+    },
+    {
+      memoryKey: "g_loud_gap_reset_ms",
+      databaseKey: "loud_gap_reset_ms",
+      dataType: "ulong",
+      defaultValue: 2000,
+      label: "Loud Gap Reset Timeout (ms)",
+      tooltip: "The max time allowed between loud sounds before the counter resets."
+    },
+    {
+      memoryKey: "g_loud_active_dur_ms",
+      databaseKey: "loud_active_dur_ms",
+      dataType: "ulong",
+      defaultValue: 5000,
+      label: "Loud Active State Duration (ms)",
+      tooltip: "Total length of time the loud alarm or state remains active once triggered."
+    },
+    {
+      memoryKey: "g_noisy_count_loud_ms",
+      databaseKey: "noisy_count_loud_ms",
+      dataType: "ulong",
+      defaultValue: 3000,
+      label: "Noisy Counter Frame (ms)",
+      tooltip: "Time window within which consecutive noisy events are counted."
+    },
+    {
+      memoryKey: "g_noisy_trigger_count",
+      databaseKey: "noisy_trigger_count",
+      dataType: "integer",
+      defaultValue: 3,
+      label: "Noisy Trigger Threshold Count",
+      tooltip: "Number of distinct noisy spikes required within the window to trip the system."
+    },
+    {
+      memoryKey: "g_noisy_accum_ms_cfg",
+      databaseKey: "noisy_accum_ms",
+      dataType: "ulong",
+      defaultValue: 3000,
+      label: "Noisy Accumulation Window (ms)",
+      tooltip: "The rolling time frame configuration for raw noisy sample filtering."
+    },
+    {
+      memoryKey: "g_audio_push_interval",
+      databaseKey: "audio_push_interval",
+      dataType: "ulong",
+      defaultValue: 1000,
+      label: "Telemetry Push Interval (ms)",
+      tooltip: "Frequency rate at which the MCU streams audio data back up to the cloud database."
+    },
+    {
+      memoryKey: "g_qr_cooldown_ms",
+      databaseKey: "qr_cooldown_ms",
+      dataType: "ulong",
+      defaultValue: 10000,
+      label: "QR Scan Cooldown Timeout (ms)",
+      tooltip: "Cooldown window before the hardware allows a duplicate QR payload scan."
+    },
+    {
+      memoryKey: "g_recal_requested_cloud",
+      databaseKey: "recal_requested",
+      dataType: "boolean",
+      defaultValue: false,
+      label: "Request System Recalibration",
+      tooltip: "Force the MCU to execute an immediate ambient audio sensor recalibration routine."
+    }
+  ];
+
   const SEATS_PER_TABLE = 4;
   const DEFAULT_MAX_WARNINGS = 3;
   const DEFAULT_REFRESH_INTERVAL_MS = 5000;
@@ -47,6 +154,8 @@
   const sensorOutageAlertedTables = new Set();
   let sensorOutageAlertQueue = [];
   let sensorOutageModalOpen = false;
+
+  let pendingHardwareConfigUpdate = null;
 
   let mainContent = null;
   let sidebar = null;
@@ -233,7 +342,7 @@
 
   function playSoundForInteraction(event) {
     const interactiveElement = event.target.closest(
-      "button, .nav-item, .mobile-nav-item, .students-box, .status-toggle-button, .brand-home"
+      "button, .nav-item, .mobile-nav-item, .students-box, .status-toggle-button, .brand-home, .hardware-config-entry"
     );
 
     if (!interactiveElement) {
@@ -244,7 +353,8 @@
       interactiveElement.classList.contains("dispatch-confirm-btn") ||
       interactiveElement.classList.contains("dispatch-btn") ||
       interactiveElement.classList.contains("sensor-check-btn") ||
-      interactiveElement.classList.contains("remove-student-confirm-btn")
+      interactiveElement.classList.contains("remove-student-confirm-btn") ||
+      interactiveElement.classList.contains("hardware-confirm-btn")
     ) {
       playUiSound("success");
       return;
@@ -257,7 +367,9 @@
       interactiveElement.classList.contains("search-clear-btn") ||
       interactiveElement.classList.contains("three-strike-close-btn") ||
       interactiveElement.classList.contains("sensor-dismiss-btn") ||
-      interactiveElement.classList.contains("remove-student-cancel-btn")
+      interactiveElement.classList.contains("remove-student-cancel-btn") ||
+      interactiveElement.classList.contains("hardware-cancel-btn") ||
+      interactiveElement.classList.contains("hardware-modal-close")
     ) {
       playUiSound("soft");
       return;
@@ -1505,13 +1617,22 @@
   function updateStats() {
     const occupancyElement = document.getElementById("occupancy");
     const warningsElement = document.getElementById("warnings");
+    const warningsMetricCard = document.getElementById("warningsMetricCard");
 
     if (occupancyElement) {
       occupancyElement.textContent = `${dashboardData.occupancy.current} / ${dashboardData.occupancy.max}`;
     }
 
     if (warningsElement) {
-      warningsElement.textContent = `${String(dashboardData.warnings).padStart(2, "0")} Active`;
+      if (dashboardData.warnings <= 0) {
+        warningsElement.textContent = "";
+      } else {
+        warningsElement.textContent = `${String(dashboardData.warnings).padStart(2, "0")} Active`;
+      }
+    }
+
+    if (warningsMetricCard) {
+      warningsMetricCard.classList.toggle("empty-warning-metric", dashboardData.warnings <= 0);
     }
 
     updateHeaderPopovers();
@@ -2506,6 +2627,719 @@
     }
   }
 
+  function openHardwareConfigModal(unitId) {
+    const selectedUnitId = unitId || getDefaultHardwareUnitId();
+    const overlay = ensureHardwareConfigModal();
+
+    overlay.innerHTML = createHardwareConfigModalMarkup(selectedUnitId);
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function ensureHardwareConfigModal() {
+    let overlay = document.getElementById("hardwareConfigOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "hardwareConfigOverlay";
+    overlay.className = "modal-overlay hardware-config-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeHardwareConfigModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function createHardwareConfigModalMarkup(selectedUnitId) {
+    const selectedTable = getTableConfigByUnitId(selectedUnitId) || TABLE_CONFIG[0];
+    const currentConfig = getHardwareCurrentConfig(selectedTable.unitId);
+
+    const numericFields = HARDWARE_CONFIG_SCHEMA
+      .filter(function (field) {
+        return field.dataType !== "boolean";
+      })
+      .map(function (field) {
+        const currentValue = getConfigValue(currentConfig, field.databaseKey);
+        const currentText = currentValue === undefined ? "Not set" : formatHardwareConfigValue(currentValue, field.dataType);
+
+        return `
+          <div class="hardware-field">
+            <label for="hardware_${escapeHtml(field.databaseKey)}">
+              <span>${escapeHtml(field.label)}</span>
+
+              <span class="info-tooltip" tabindex="0">
+                i
+                <span class="tooltip-card">${escapeHtml(field.tooltip)}</span>
+              </span>
+            </label>
+
+            <input
+              id="hardware_${escapeHtml(field.databaseKey)}"
+              class="hardware-config-input"
+              type="text"
+              inputmode="${field.dataType === "float" ? "decimal" : "numeric"}"
+              autocomplete="off"
+              placeholder="${escapeHtml(String(field.defaultValue))}"
+              data-config-key="${escapeHtml(field.databaseKey)}"
+              data-memory-key="${escapeHtml(field.memoryKey)}"
+              data-type="${escapeHtml(field.dataType)}"
+              data-default-value="${escapeHtml(String(field.defaultValue))}"
+              oninput="clearHardwareConfigError()"
+            />
+
+            <div class="hardware-field-meta">
+              <span>Firebase: <code>${escapeHtml(field.databaseKey)}</code></span>
+              <span>Current: <strong>${escapeHtml(currentText)}</strong></span>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+    const recalField = HARDWARE_CONFIG_SCHEMA.find(function (field) {
+      return field.dataType === "boolean";
+    });
+
+    const currentRecalValue = getBooleanConfigValue(currentConfig, recalField.databaseKey, recalField.defaultValue);
+
+    return `
+      <div class="hardware-config-card" role="dialog" aria-modal="true">
+        <div class="hardware-config-header">
+          <div class="hardware-config-title">
+            <span class="hardware-config-title-icon">
+              <span class="material-symbols-outlined">memory</span>
+            </span>
+
+            <div>
+              <p>Device Settings</p>
+              <h3>Hardware Configuration</h3>
+            </div>
+          </div>
+
+          <button class="hardware-modal-close" type="button" onclick="closeHardwareConfigModal()" aria-label="Close hardware configuration">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        <div class="hardware-config-body">
+          <div class="hardware-target-row">
+            <label for="hardwareConfigTarget">Target table device</label>
+
+            <select id="hardwareConfigTarget" onchange="handleHardwareTargetChange(this.value)">
+              ${TABLE_CONFIG.map(function (tableConfig) {
+                const selected = tableConfig.unitId === selectedTable.unitId ? "selected" : "";
+
+                return `
+                  <option value="${escapeHtml(tableConfig.unitId)}" ${selected}>
+                    Table ${escapeHtml(tableConfig.id)} / ${escapeHtml(tableConfig.unitId)}
+                  </option>
+                `;
+              }).join("")}
+            </select>
+          </div>
+
+          <div class="hardware-config-note">
+            <span class="material-symbols-outlined">info</span>
+            <p>
+              Blank numeric fields will be skipped. The dashboard writes only the changed values to
+              <strong>/devices/${escapeHtml(selectedTable.unitId)}/config</strong>.
+            </p>
+          </div>
+
+          <div class="hardware-fields-grid">
+            ${numericFields}
+
+            <div class="hardware-field hardware-field-wide">
+              <label for="hardware_${escapeHtml(recalField.databaseKey)}">
+                <span>${escapeHtml(recalField.label)}</span>
+
+                <span class="info-tooltip" tabindex="0">
+                  i
+                  <span class="tooltip-card">${escapeHtml(recalField.tooltip)}</span>
+                </span>
+              </label>
+
+              <select
+                id="hardware_${escapeHtml(recalField.databaseKey)}"
+                class="hardware-config-select"
+                data-config-key="${escapeHtml(recalField.databaseKey)}"
+                data-memory-key="${escapeHtml(recalField.memoryKey)}"
+                data-type="boolean"
+                data-original-value="${String(currentRecalValue)}"
+                onchange="markHardwareBooleanDirty(this)"
+              >
+                <option value="false" ${currentRecalValue === false ? "selected" : ""}>false</option>
+                <option value="true" ${currentRecalValue === true ? "selected" : ""}>true</option>
+              </select>
+
+              <div class="hardware-field-meta">
+                <span>Firebase: <code>${escapeHtml(recalField.databaseKey)}</code></span>
+                <span>Current: <strong>${String(currentRecalValue)}</strong></span>
+              </div>
+
+              <p class="hardware-field-warning">
+                Recalibration is sent only if you change this dropdown value before saving.
+              </p>
+            </div>
+          </div>
+
+          <div id="hardwareConfigError" class="hardware-config-error hidden"></div>
+        </div>
+
+        <div class="hardware-config-actions">
+          <button type="button" class="hardware-cancel-btn" onclick="closeHardwareConfigModal()">
+            Cancel
+          </button>
+
+          <button type="button" class="hardware-save-btn" onclick="saveHardwareConfigChanges()">
+            Save Changes
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function handleHardwareTargetChange(unitId) {
+    const overlay = ensureHardwareConfigModal();
+
+    overlay.innerHTML = createHardwareConfigModalMarkup(unitId);
+  }
+
+  function closeHardwareConfigModal() {
+    const overlay = document.getElementById("hardwareConfigOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    closeHardwareConfigConfirmModal();
+
+    document.body.classList.remove("modal-open");
+  }
+
+  function markHardwareBooleanDirty(selectElement) {
+    if (!selectElement) {
+      return;
+    }
+
+    const originalValue = String(selectElement.getAttribute("data-original-value") || "false");
+    selectElement.dataset.dirty = String(selectElement.value) !== originalValue ? "true" : "false";
+    clearHardwareConfigError();
+  }
+
+  function clearHardwareConfigError() {
+    const errorBox = document.getElementById("hardwareConfigError");
+
+    if (!errorBox) {
+      return;
+    }
+
+    errorBox.classList.add("hidden");
+    errorBox.textContent = "";
+  }
+
+  function showHardwareConfigError(message) {
+    const errorBox = document.getElementById("hardwareConfigError");
+
+    if (!errorBox) {
+      alert(message);
+      return;
+    }
+
+    errorBox.textContent = message;
+    errorBox.classList.remove("hidden");
+  }
+
+  function saveHardwareConfigChanges() {
+    const result = collectHardwareConfigPayload();
+
+    if (!result.ok) {
+      showHardwareConfigError(result.error);
+      return;
+    }
+
+    pendingHardwareConfigUpdate = result.data;
+    openHardwareConfigConfirmModal(result.data);
+  }
+
+  function collectHardwareConfigPayload() {
+    const targetSelect = document.getElementById("hardwareConfigTarget");
+
+    if (!targetSelect) {
+      return {
+        ok: false,
+        error: "Target device selector was not found. Please reopen the configuration panel."
+      };
+    }
+
+    const unitId = targetSelect.value;
+    const tableConfig = getTableConfigByUnitId(unitId);
+
+    if (!tableConfig) {
+      return {
+        ok: false,
+        error: "Selected table device is not valid."
+      };
+    }
+
+    const currentConfig = getHardwareCurrentConfig(unitId);
+    const payload = {};
+    const summary = [];
+
+    const numericInputs = Array.from(document.querySelectorAll(".hardware-config-input"));
+
+    for (const input of numericInputs) {
+      const rawValue = String(input.value || "").trim();
+
+      if (rawValue === "") {
+        continue;
+      }
+
+      const databaseKey = input.getAttribute("data-config-key");
+      const memoryKey = input.getAttribute("data-memory-key");
+      const dataType = input.getAttribute("data-type");
+      const schemaField = getHardwareSchemaField(databaseKey);
+
+      const parsed = parseHardwareConfigInput(rawValue, dataType, schemaField ? schemaField.label : databaseKey);
+
+      if (!parsed.ok) {
+        return parsed;
+      }
+
+      payload[databaseKey] = parsed.value;
+      summary.push({
+        label: schemaField ? schemaField.label : databaseKey,
+        databaseKey,
+        memoryKey,
+        value: parsed.value,
+        dataType
+      });
+    }
+
+    const booleanSelect = document.querySelector(".hardware-config-select[data-type='boolean']");
+
+    if (booleanSelect && booleanSelect.dataset.dirty === "true") {
+      const databaseKey = booleanSelect.getAttribute("data-config-key");
+      const memoryKey = booleanSelect.getAttribute("data-memory-key");
+      const schemaField = getHardwareSchemaField(databaseKey);
+      const boolValue = String(booleanSelect.value) === "true";
+
+      payload[databaseKey] = boolValue;
+      summary.push({
+        label: schemaField ? schemaField.label : databaseKey,
+        databaseKey,
+        memoryKey,
+        value: boolValue,
+        dataType: "boolean"
+      });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return {
+        ok: false,
+        error: "No changes were entered. Fill at least one field or change the recalibration dropdown."
+      };
+    }
+
+    const thresholdValidation = validateHardwareThresholds(payload, currentConfig);
+
+    if (!thresholdValidation.ok) {
+      return thresholdValidation;
+    }
+
+    return {
+      ok: true,
+      data: {
+        unitId,
+        tableId: tableConfig.id,
+        path: `/devices/${unitId}/config`,
+        payload,
+        summary
+      }
+    };
+  }
+
+  function parseHardwareConfigInput(rawValue, dataType, label) {
+    if (dataType === "float") {
+      const value = Number(rawValue);
+
+      if (!Number.isFinite(value)) {
+        return {
+          ok: false,
+          error: `${label} must be a valid number.`
+        };
+      }
+
+      if (value < 0) {
+        return {
+          ok: false,
+          error: `${label} cannot be negative.`
+        };
+      }
+
+      return {
+        ok: true,
+        value
+      };
+    }
+
+    if (dataType === "integer" || dataType === "ulong") {
+      if (!/^\d+$/.test(rawValue)) {
+        return {
+          ok: false,
+          error: `${label} must be a whole non-negative number.`
+        };
+      }
+
+      const value = Number(rawValue);
+
+      if (!Number.isSafeInteger(value)) {
+        return {
+          ok: false,
+          error: `${label} is too large. Use a safer whole number.`
+        };
+      }
+
+      return {
+        ok: true,
+        value
+      };
+    }
+
+    return {
+      ok: false,
+      error: `${label} has an unsupported data type.`
+    };
+  }
+
+  function validateHardwareThresholds(payload, currentConfig) {
+    const quietCeiling = getEffectiveHardwareNumber("quiet_ceiling", payload, currentConfig);
+    const noisyThreshold = getEffectiveHardwareNumber("noisy_threshold", payload, currentConfig);
+    const loudThreshold = getEffectiveHardwareNumber("loud_threshold", payload, currentConfig);
+
+    if (quietCeiling >= noisyThreshold) {
+      return {
+        ok: false,
+        error: "Quiet Ceiling must be lower than Noisy Threshold."
+      };
+    }
+
+    if (noisyThreshold >= loudThreshold) {
+      return {
+        ok: false,
+        error: "Noisy Threshold must be lower than Loud Threshold."
+      };
+    }
+
+    return {
+      ok: true
+    };
+  }
+
+  function getEffectiveHardwareNumber(databaseKey, payload, currentConfig) {
+    if (Object.prototype.hasOwnProperty.call(payload, databaseKey)) {
+      return Number(payload[databaseKey]);
+    }
+
+    if (currentConfig && currentConfig[databaseKey] !== undefined && currentConfig[databaseKey] !== null) {
+      const currentNumber = Number(currentConfig[databaseKey]);
+
+      if (Number.isFinite(currentNumber)) {
+        return currentNumber;
+      }
+    }
+
+    const schemaField = getHardwareSchemaField(databaseKey);
+    return schemaField ? Number(schemaField.defaultValue) : 0;
+  }
+
+  function openHardwareConfigConfirmModal(updateData) {
+    const overlay = ensureHardwareConfigConfirmModal();
+
+    overlay.innerHTML = `
+      <div class="hardware-confirm-card" role="dialog" aria-modal="true">
+        <div class="hardware-confirm-icon">
+          <span class="material-symbols-outlined">cloud_upload</span>
+        </div>
+
+        <div class="hardware-confirm-content">
+          <h3>Push configurations?</h3>
+
+          <p>
+            Are you sure you want to push these configurations to the live hardware device?
+          </p>
+
+          <div class="hardware-confirm-target">
+            <span class="material-symbols-outlined">developer_board</span>
+            <strong>Table ${escapeHtml(updateData.tableId)} / ${escapeHtml(updateData.unitId)}</strong>
+            <small>${escapeHtml(updateData.path)}</small>
+          </div>
+
+          <div class="hardware-confirm-summary">
+            ${updateData.summary.map(function (item) {
+              return `
+                <div class="hardware-confirm-row">
+                  <span>
+                    ${escapeHtml(item.label)}
+                    <small>${escapeHtml(item.databaseKey)}</small>
+                  </span>
+                  <strong>${escapeHtml(formatHardwareConfigValue(item.value, item.dataType))}</strong>
+                </div>
+              `;
+            }).join("")}
+          </div>
+
+          <div class="hardware-confirm-actions">
+            <button type="button" class="hardware-cancel-btn" onclick="closeHardwareConfigConfirmModal()">
+              Cancel
+            </button>
+
+            <button type="button" class="hardware-confirm-btn" onclick="confirmHardwareConfigUpdate()">
+              Confirm Changes
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    overlay.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function ensureHardwareConfigConfirmModal() {
+    let overlay = document.getElementById("hardwareConfigConfirmOverlay");
+
+    if (overlay) {
+      return overlay;
+    }
+
+    overlay = document.createElement("div");
+    overlay.id = "hardwareConfigConfirmOverlay";
+    overlay.className = "modal-overlay hardware-confirm-overlay hidden";
+
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) {
+        closeHardwareConfigConfirmModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function closeHardwareConfigConfirmModal() {
+    const overlay = document.getElementById("hardwareConfigConfirmOverlay");
+
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.innerHTML = "";
+    }
+
+    pendingHardwareConfigUpdate = null;
+
+    const configOverlay = document.getElementById("hardwareConfigOverlay");
+    const configModalStillOpen = configOverlay && !configOverlay.classList.contains("hidden");
+
+    if (!configModalStillOpen) {
+      document.body.classList.remove("modal-open");
+    }
+  }
+
+  async function confirmHardwareConfigUpdate() {
+    if (!pendingHardwareConfigUpdate) {
+      showToast("No pending hardware configuration update found.", "error");
+      closeHardwareConfigConfirmModal();
+      return;
+    }
+
+    const updateData = pendingHardwareConfigUpdate;
+    const confirmButton = document.querySelector(".hardware-confirm-btn");
+
+    if (confirmButton) {
+      confirmButton.disabled = true;
+      confirmButton.textContent = "Pushing...";
+    }
+
+    try {
+      await patchHardwareConfig(updateData.unitId, updateData.payload);
+      applyLocalHardwareConfigPatch(updateData.unitId, updateData.payload);
+
+      closeHardwareConfigConfirmModal();
+
+      const configOverlay = document.getElementById("hardwareConfigOverlay");
+
+      if (configOverlay && !configOverlay.classList.contains("hidden")) {
+        configOverlay.innerHTML = createHardwareConfigModalMarkup(updateData.unitId);
+      }
+
+      showToast("Configuration pushed. Device may apply it on its next config check.", "success");
+    } catch (error) {
+      console.error("Hardware config update failed:", error);
+
+      if (confirmButton) {
+        confirmButton.disabled = false;
+        confirmButton.textContent = "Confirm Changes";
+      }
+
+      showToast(`Configuration update failed: ${getSafeErrorMessage(error)}`, "error");
+    }
+  }
+
+  async function patchHardwareConfig(unitId, payload) {
+    const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
+    const path = `devices/${encodeURIComponent(unitId)}/config`;
+    const url = `${databaseUrl}/${path}.json?print=silent`;
+
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Firebase PATCH failed with status ${response.status}`);
+    }
+  }
+
+  function applyLocalHardwareConfigPatch(unitId, payload) {
+    if (!isPlainObject(firebaseDevices[unitId])) {
+      firebaseDevices[unitId] = {};
+    }
+
+    if (!isPlainObject(firebaseDevices[unitId].config)) {
+      firebaseDevices[unitId].config = {};
+    }
+
+    Object.assign(firebaseDevices[unitId].config, payload);
+  }
+
+  function getHardwareCurrentConfig(unitId) {
+    const unit = firebaseDevices[unitId];
+
+    if (!isPlainObject(unit) || !isPlainObject(unit.config)) {
+      return {};
+    }
+
+    return unit.config;
+  }
+
+  function getConfigValue(config, databaseKey) {
+    if (!config || config[databaseKey] === undefined || config[databaseKey] === null) {
+      return undefined;
+    }
+
+    return config[databaseKey];
+  }
+
+  function getBooleanConfigValue(config, databaseKey, fallback) {
+    const value = getConfigValue(config, databaseKey);
+
+    if (typeof value === "boolean") {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      return value.toLowerCase().trim() === "true";
+    }
+
+    if (typeof value === "number") {
+      return value !== 0;
+    }
+
+    return Boolean(fallback);
+  }
+
+  function getDefaultHardwareUnitId() {
+    const tableWithConfig = TABLE_CONFIG.find(function (tableConfig) {
+      const unit = firebaseDevices[tableConfig.unitId];
+      return isPlainObject(unit) && isPlainObject(unit.config);
+    });
+
+    return tableWithConfig ? tableWithConfig.unitId : TABLE_CONFIG[0].unitId;
+  }
+
+  function getTableConfigByUnitId(unitId) {
+    return TABLE_CONFIG.find(function (tableConfig) {
+      return tableConfig.unitId === unitId;
+    });
+  }
+
+  function getHardwareSchemaField(databaseKey) {
+    return HARDWARE_CONFIG_SCHEMA.find(function (field) {
+      return field.databaseKey === databaseKey;
+    });
+  }
+
+  function formatHardwareConfigValue(value, dataType) {
+    if (dataType === "boolean") {
+      return String(Boolean(value));
+    }
+
+    if (dataType === "float") {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? String(numeric) : String(value);
+    }
+
+    return String(value);
+  }
+
+  function ensureToastContainer() {
+    let container = document.getElementById("toastContainer");
+
+    if (container) {
+      return container;
+    }
+
+    container = document.createElement("div");
+    container.id = "toastContainer";
+    container.className = "toast-container";
+    document.body.appendChild(container);
+
+    return container;
+  }
+
+  function showToast(message, type) {
+    const container = ensureToastContainer();
+    const toast = document.createElement("div");
+    const toastType = type === "error" ? "error" : "success";
+
+    toast.className = `toast-message ${toastType}`;
+    toast.innerHTML = `
+      <span class="material-symbols-outlined">
+        ${toastType === "error" ? "error" : "check_circle"}
+      </span>
+      <p>${escapeHtml(message)}</p>
+    `;
+
+    container.appendChild(toast);
+
+    window.setTimeout(function () {
+      toast.classList.add("leaving");
+    }, 4200);
+
+    window.setTimeout(function () {
+      toast.remove();
+    }, 4700);
+  }
+
+  function getSafeErrorMessage(error) {
+    if (!error) {
+      return "Unknown error";
+    }
+
+    const message = String(error.message || error || "Unknown error");
+    return message.slice(0, 180);
+  }
+
   function downloadBlob(content, filename, mimeType) {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
@@ -2661,4 +3495,13 @@
   window.closeThreeStrikeAlertModal = closeThreeStrikeAlertModal;
   window.showSensorTroubleshooting = showSensorTroubleshooting;
   window.dismissSensorOutageModal = dismissSensorOutageModal;
+
+  window.openHardwareConfigModal = openHardwareConfigModal;
+  window.closeHardwareConfigModal = closeHardwareConfigModal;
+  window.handleHardwareTargetChange = handleHardwareTargetChange;
+  window.markHardwareBooleanDirty = markHardwareBooleanDirty;
+  window.clearHardwareConfigError = clearHardwareConfigError;
+  window.saveHardwareConfigChanges = saveHardwareConfigChanges;
+  window.closeHardwareConfigConfirmModal = closeHardwareConfigConfirmModal;
+  window.confirmHardwareConfigUpdate = confirmHardwareConfigUpdate;
 })();
