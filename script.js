@@ -48,6 +48,8 @@
   let sensorOutageAlertQueue = [];
   let sensorOutageModalOpen = false;
 
+  let duplicateTransferLogs = [];
+
   let mainContent = null;
   let sidebar = null;
   let mobileMenuToggle = null;
@@ -433,6 +435,9 @@
       const data = await response.json();
 
       firebaseDevices = isPlainObject(data) ? data : {};
+
+      await resolveDuplicateStudentLogins(firebaseDevices);
+
       dashboardData = mapFirebaseDevicesToDashboard(firebaseDevices);
       lastSuccessfulFetchAt = Date.now();
 
@@ -451,6 +456,230 @@
       console.error("Firebase fetch error:", error);
       updateConnectionStatus(false, "Firebase read failed");
     }
+  }
+
+  async function resolveDuplicateStudentLogins(devices) {
+    const studentEntries = collectCurrentStudentEntries(devices);
+    const groupedEntries = new Map();
+
+    studentEntries.forEach(function (entry) {
+      if (!entry.identity) {
+        return;
+      }
+
+      if (!groupedEntries.has(entry.identity)) {
+        groupedEntries.set(entry.identity, []);
+      }
+
+      groupedEntries.get(entry.identity).push(entry);
+    });
+
+    const duplicateDeleteTasks = [];
+
+    groupedEntries.forEach(function (entries) {
+      if (entries.length <= 1) {
+        return;
+      }
+
+      const sortedEntries = entries.slice().sort(compareStudentEntriesByLatest);
+      const latestEntry = sortedEntries[0];
+      const olderEntries = sortedEntries.slice(1);
+
+      olderEntries.forEach(function (olderEntry) {
+        duplicateDeleteTasks.push(deleteDuplicateStudentEntry(olderEntry, latestEntry));
+      });
+    });
+
+    if (duplicateDeleteTasks.length === 0) {
+      return;
+    }
+
+    await Promise.allSettled(duplicateDeleteTasks);
+  }
+
+  function collectCurrentStudentEntries(devices) {
+    const entries = [];
+
+    TABLE_CONFIG.forEach(function (tableConfig) {
+      const device = isPlainObject(devices[tableConfig.unitId])
+        ? devices[tableConfig.unitId]
+        : {};
+
+      ["current_students", "qr_codes"].forEach(function (collectionName) {
+        getObjectEntries(device[collectionName]).forEach(function ([key, value]) {
+          const student = normalizeStudentRecord(key, value, collectionName);
+          const identity = getStudentIdentity(student);
+          const scannedAtMs = getStudentScanTimestamp(student);
+
+          if (!identity) {
+            return;
+          }
+
+          entries.push({
+            identity,
+            tableId: tableConfig.id,
+            unitId: tableConfig.unitId,
+            collectionName,
+            key,
+            rawValue: value,
+            student,
+            scannedAtMs
+          });
+        });
+      });
+    });
+
+    return entries;
+  }
+
+  function getStudentIdentity(student) {
+    const idText = String(student.studentId || "").trim();
+
+    if (/^\d{6,12}$/.test(idText)) {
+      return `id:${idText}`;
+    }
+
+    const payloadIdMatch = String(student.payload || "").match(/\b\d{6,12}\b/);
+
+    if (payloadIdMatch) {
+      return `id:${payloadIdMatch[0]}`;
+    }
+
+    const normalizedPayload = String(student.payload || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (normalizedPayload.length >= 4) {
+      return `payload:${normalizedPayload}`;
+    }
+
+    return "";
+  }
+
+  function getStudentScanTimestamp(student) {
+    const timestamp = parseFirebaseTimestamp(student.scannedAt);
+
+    if (timestamp !== null) {
+      return timestamp;
+    }
+
+    return 0;
+  }
+
+  function compareStudentEntriesByLatest(a, b) {
+    if (b.scannedAtMs !== a.scannedAtMs) {
+      return b.scannedAtMs - a.scannedAtMs;
+    }
+
+    const aIndex = TABLE_CONFIG.findIndex(function (table) {
+      return table.unitId === a.unitId;
+    });
+
+    const bIndex = TABLE_CONFIG.findIndex(function (table) {
+      return table.unitId === b.unitId;
+    });
+
+    return bIndex - aIndex;
+  }
+
+  async function deleteDuplicateStudentEntry(olderEntry, latestEntry) {
+    if (
+      olderEntry.unitId === latestEntry.unitId &&
+      olderEntry.collectionName === latestEntry.collectionName &&
+      String(olderEntry.key) === String(latestEntry.key)
+    ) {
+      return;
+    }
+
+    const databaseUrl = normalizeFirebaseUrl(FIREBASE_DB_URL);
+    const pathParts = [
+      "devices",
+      olderEntry.unitId,
+      olderEntry.collectionName,
+      olderEntry.key
+    ];
+
+    const path = pathParts.map(function (part) {
+      return encodeURIComponent(String(part));
+    }).join("/");
+
+    const url = `${databaseUrl}/${path}.json?print=silent`;
+
+    try {
+      const response = await fetch(url, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        throw new Error(`Duplicate cleanup failed: ${response.status}`);
+      }
+
+      removeDuplicateEntryLocally(olderEntry);
+      addDuplicateTransferLog(olderEntry, latestEntry);
+    } catch (error) {
+      console.error("Failed to remove duplicate student entry:", {
+        olderEntry,
+        latestEntry,
+        error
+      });
+    }
+  }
+
+  function removeDuplicateEntryLocally(entry) {
+    const unit = firebaseDevices[entry.unitId];
+
+    if (!isPlainObject(unit)) {
+      return;
+    }
+
+    const collection = unit[entry.collectionName];
+
+    if (Array.isArray(collection)) {
+      delete collection[Number(entry.key)];
+      return;
+    }
+
+    if (isPlainObject(collection)) {
+      delete collection[entry.key];
+
+      if (Object.keys(collection).length === 0) {
+        delete unit[entry.collectionName];
+      }
+    }
+  }
+
+  function addDuplicateTransferLog(olderEntry, latestEntry) {
+    const studentName = latestEntry.student.name || olderEntry.student.name || "Registered Student";
+    const studentId =
+      latestEntry.student.studentId ||
+      olderEntry.student.studentId ||
+      "Unknown ID";
+
+    const alreadyLogged = duplicateTransferLogs.some(function (log) {
+      return (
+        log.identity === latestEntry.identity &&
+        log.fromTable === olderEntry.tableId &&
+        log.toTable === latestEntry.tableId &&
+        Math.abs(log.time - Date.now()) < 30000
+      );
+    });
+
+    if (alreadyLogged) {
+      return;
+    }
+
+    duplicateTransferLogs.unshift({
+      time: Date.now(),
+      identity: latestEntry.identity,
+      studentName,
+      studentId,
+      fromTable: olderEntry.tableId,
+      toTable: latestEntry.tableId,
+      action: `${studentName} (${studentId}) moved from Table ${olderEntry.tableId} to Table ${latestEntry.tableId}.`
+    });
+
+    duplicateTransferLogs = duplicateTransferLogs.slice(0, 30);
   }
 
   function mapFirebaseDevicesToDashboard(devices) {
@@ -1455,6 +1684,13 @@
 
     const logs = [];
 
+    duplicateTransferLogs.forEach(function (log) {
+      logs.push({
+        time: log.time,
+        action: log.action
+      });
+    });
+
     dashboardData.tables.forEach(function (table) {
       table.students.forEach(function (student) {
         logs.push({
@@ -1505,13 +1741,22 @@
   function updateStats() {
     const occupancyElement = document.getElementById("occupancy");
     const warningsElement = document.getElementById("warnings");
+    const warningsMetricCard = document.getElementById("warningsMetricCard");
 
     if (occupancyElement) {
       occupancyElement.textContent = `${dashboardData.occupancy.current} / ${dashboardData.occupancy.max}`;
     }
 
     if (warningsElement) {
-      warningsElement.textContent = `${String(dashboardData.warnings).padStart(2, "0")} Active`;
+      if (dashboardData.warnings <= 0) {
+        warningsElement.textContent = "";
+      } else {
+        warningsElement.textContent = `${String(dashboardData.warnings).padStart(2, "0")} Active`;
+      }
+    }
+
+    if (warningsMetricCard) {
+      warningsMetricCard.classList.toggle("empty-warning-metric", dashboardData.warnings <= 0);
     }
 
     updateHeaderPopovers();
